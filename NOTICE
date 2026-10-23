@@ -1,0 +1,1 @@
+Contains extracted/adapted OpenAirInterface code under OAI Public License v1.1 (LICENSE). Original license notices retained. No full XSAI checkout, libraries, model weights or private machine logs are distributed. DFT cooperative candidate derives from local XSAI RVV implementation; compatibility is checked at build/run, not guaranteed across arbitrary revisions.

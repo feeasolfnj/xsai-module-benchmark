@@ -1,0 +1,5 @@
+/build/
+/results/
+/config.local.json
+__pycache__/
+*.pyc
