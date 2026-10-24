@@ -529,13 +529,13 @@ int main(int argc, char **argv)
     for(int coding_trial=0;coding_trial<coding_repeats;coding_trial++){
       bzero(output,sizeof(output));
       unsigned long long input_hash=coding_hash(test_input,TBS/8);
-      if(coding_trial>=10)pmu_begin();
+      if(coding_trial>=(getenv("CODING_WARMUP")?atoi(getenv("CODING_WARMUP")):10))pmu_begin();
       double cpu0=coding_clock(CLOCK_PROCESS_CPUTIME_ID),wall0=coding_clock(CLOCK_MONOTONIC_RAW);
       start_meas(&gNB->dlsch_encoding_stats);
       int coding_ret=nr_dlsch_encoding(gNB,&msgDataTx,frame,slot,frame_parms,output,&coding_stats[0],&coding_stats[1],&coding_stats[2],&coding_stats[3],&coding_stats[4],&coding_stats[5],&coding_stats[6]);
       stop_meas(&gNB->dlsch_encoding_stats);
       double wall_us=(coding_clock(CLOCK_MONOTONIC_RAW)-wall0)*1e6,cpu_us=(coding_clock(CLOCK_PROCESS_CPUTIME_ID)-cpu0)*1e6;
-      if(coding_trial>=10)pmu_end(1);
+      if(coding_trial>=(getenv("CODING_WARMUP")?atoi(getenv("CODING_WARMUP")):10))pmu_end(1);
       AssertFatal(coding_ret!=-1,"DL coding failed");
       unsigned long long output_hash=coding_hash(output,(available_bits+7)/8);
       if(coding_trial==0)expected_output=output_hash;else AssertFatal(expected_output==output_hash,"DL repeated output changed");

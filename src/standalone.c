@@ -1651,15 +1651,20 @@ int main(int argc,char**argv){
  logInit();set_glog(OAILOG_ERR);cpu_meas_enabled=1;load_dftslib();
  uint32_t seed=argc>1?strtoul(argv[1],NULL,0):20261022;int workers=argc>2?atoi(argv[2]):0;double seconds=argc>3?atof(argv[3]):1.5;
  AssertFatal(workers==0||workers==8,"workers must be 0 or 8");
- tb_context_t*base=tb_random(seed,50),*c=tb_random(seed,50),*ref=tb_random(seed,50);
- initFloatingCoresTpool(0,&ref->g->threadPool,true,"reference");tb_execute(ref,TB_KIND);
+ int bank=getenv("BENCH_INPUT_BANK")?atoi(getenv("BENCH_INPUT_BANK")):1;AssertFatal(bank>=1&&bank<=16,"input bank");
+ int warmup=getenv("BENCH_WARMUP")?atoi(getenv("BENCH_WARMUP")):20;
+ tb_context_t *bases[16],*refs[16],*c=tb_random(seed,50),*base=NULL,*ref=NULL;
+ for(int i=0;i<bank;i++){uint32_t next=seed+(uint32_t)i*2654435761u;bases[i]=tb_random(next,50);refs[i]=tb_random(next,50);initFloatingCoresTpool(0,&refs[i]->g->threadPool,true,"reference");tb_execute(refs[i],TB_KIND);}
+ base=bases[0];ref=refs[0];
  printf("[RANDOM_INPUT] seed=%u source=xorshift32 iq_min=-2048 iq_max=2047 file_reads=0 reference=serial_same_random_input\n",seed);
   initFloatingCoresTpool(workers,&c->g->threadPool,true,"module-tpool");
  printf("[STANDALONE] kind=%d rb=%d fft=%d rx=%d layers=%d qm=%d symbols=%d dmrs_mask=%u G=%u workers=%d no_link_setup=1\n",TB_KIND,c->h->pdu.rb_size,c->h->fp.ofdm_symbol_size,c->h->fp.nb_antennas_rx,c->h->pdu.nrOfLayers,c->h->pdu.qam_mod_order,c->h->pdu.nr_of_symbols,c->h->pdu.ul_dmrs_symb_pos,c->G,workers);
- for(int i=0;i<20;i++){tb_restore(c,base);tb_execute(c,TB_KIND);tb_check(c,ref);}
+ for(int i=0;i<warmup;i++){tb_restore(c,base);tb_execute(c,TB_KIND);tb_check(c,ref);}
  unsigned long calls=0;double wall=0,cpu=0,begin=tb_clock(CLOCK_MONOTONIC_RAW),process_begin=tb_clock(CLOCK_PROCESS_CPUTIME_ID);uint64_t immutable=tb_digest(c->g->common_vars.rxdataF[0][0],c->rx_count*sizeof(c16_t));
- do{tb_restore(c,base);pmu_begin();double t0=tb_clock(CLOCK_MONOTONIC_RAW);tb_execute(c,TB_KIND);wall+=tb_clock(CLOCK_MONOTONIC_RAW)-t0;pmu_end(1);calls++;if((calls&255)==0)tb_check(c,ref);}while(tb_clock(CLOCK_MONOTONIC_RAW)-begin<seconds);
+ do{int index=calls%bank;base=bases[index];ref=refs[index];tb_restore(c,base);
+ if(bank>1){memcpy(c->g->common_vars.rxdataF[0][0],base->g->common_vars.rxdataF[0][0],c->rx_count*sizeof(c16_t));memcpy(c->scramble,base->scramble,c->G*sizeof(int16_t));}
+ pmu_begin();double t0=tb_clock(CLOCK_MONOTONIC_RAW);tb_execute(c,TB_KIND);wall+=tb_clock(CLOCK_MONOTONIC_RAW)-t0;pmu_end(1);calls++;if((calls&255)==0)tb_check(c,ref);}while(tb_clock(CLOCK_MONOTONIC_RAW)-begin<seconds);
  double window_wall=tb_clock(CLOCK_MONOTONIC_RAW)-begin;cpu=tb_clock(CLOCK_PROCESS_CPUTIME_ID)-process_begin;
- tb_check(c,ref);AssertFatal(immutable==tb_digest(c->g->common_vars.rxdataF[0][0],c->rx_count*sizeof(c16_t)),"input changed");
- printf("[RESULT] kind=%d workers=%d calls=%lu mean_us=%.9f wall_s=%.9f cpu_s=%.9f cores=%.9f verified=1 input_hash=%llu window_wall_s=%.9f compute_fraction=%.9f\n",TB_KIND,workers,calls,wall*1e6/calls,wall,cpu,cpu/window_wall,(unsigned long long)immutable,window_wall,wall/window_wall);abortTpool(&c->g->threadPool);return 0;
+ tb_check(c,ref);AssertFatal(tb_digest(base->g->common_vars.rxdataF[0][0],c->rx_count*sizeof(c16_t))==tb_digest(c->g->common_vars.rxdataF[0][0],c->rx_count*sizeof(c16_t)),"input changed");
+ printf("[RESULT] kind=%d workers=%d calls=%lu mean_us=%.9f wall_s=%.9f cpu_s=%.9f cores=%.9f verification=passed verification_scope=serial_same_implementation input_hash=%llu window_wall_s=%.9f compute_fraction=%.9f\n",TB_KIND,workers,calls,wall*1e6/calls,wall,cpu,cpu/window_wall,(unsigned long long)immutable,window_wall,wall/window_wall);abortTpool(&c->g->threadPool);return 0;
 }

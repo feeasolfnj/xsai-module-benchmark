@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Independent, relocatable XSAI module benchmark launcher (Linux/RISC-V)."""
-import argparse,csv,datetime,fcntl,hashlib,json,os,pathlib,re,shlex,shutil,subprocess,sys,uuid,statistics
+import argparse,csv,datetime,math,hashlib,json,os,pathlib,re,shlex,shutil,subprocess,sys,uuid,statistics
+from bench_support import BenchError, select_cpus, benchmark_lock, fixed_frequency, frequency_snapshot, check_frequency, records, write_csv, summary
 P=pathlib.Path;ROOT=P(__file__).resolve().parent
 NAMES={'estimation':'test_pusch_estimation','measurement':'test_pusch_measurement','symbol':'test_pusch_symbol','llr':'test_llr_region','UL':'nr_ulschsim','DL':'nr_dlschsim','neural':'test_neural','dft':'bench-coop','idft':'bench-coop'}
 PAIRS={'estimation':(0,1),'measurement':(2,3),'symbol':(4,5),'neural':(6,7),'llr':(8,9),'UL':(10,11),'DL':(12,13),'dft':(14,16)}
@@ -9,7 +10,9 @@ def sha(p):return hashlib.sha256(P(p).read_bytes()).hexdigest()
 def shell(cmd,cwd):
  q=subprocess.run(cmd,cwd=cwd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
  print(q.stdout,end='');return q
-def config():return json.loads((ROOT/'config.local.json').read_text())
+def config():
+ if not (ROOT/'config.local.json').exists():raise BenchError('Run build --xsai /path/to/XSAI first')
+ return json.loads((ROOT/'config.local.json').read_text())
 def flags(path):
  d={}
  for line in path.read_text().splitlines():
@@ -17,40 +20,57 @@ def flags(path):
  return sum([d[k] for k in ['C_DEFINES','C_INCLUDES','C_FLAGS']],[])
 def build(a):
  xsai=P(a.xsai).resolve();b=P(a.build).resolve() if a.build else xsai/'cmake_targets/ran_build/build';out=ROOT/'build';out.mkdir(exist_ok=True)
- assert (b/'libdfts.so').exists(),'Build local XSAI first; see README'
+ if not (b/'libdfts.so').exists():raise BenchError('Missing libdfts.so; run doctor --xsai '+str(xsai))
+ if not shutil.which(a.cc):raise BenchError('Compiler not found: '+a.cc)
+ keys=list(PAIRS) if a.only=='all' else list(dict.fromkeys('dft' if x=='idft' else x for x in a.only.split(',')))
+ if set(keys)-set(PAIRS):raise BenchError('Unknown build metric')
+ ready_file=out/'ready.json';ready=json.loads(ready_file.read_text()) if ready_file.exists() else {}
+ if ready.get('_xsai')!=str(xsai) or ready.get('_build')!=str(b):ready={}
+ ready.update(_xsai=str(xsai),_build=str(b))
+ for key in keys:ready.pop(key,None)
+ save(ready_file,ready)
  previous=json.loads((ROOT/'config.local.json').read_text()) if (ROOT/'config.local.json').exists() else {}
  c=dict(xsai=str(xsai),build=str(b),src=str(ROOT/'src'),out=str(out),cc=a.cc,pmu=a.pmu,metric_pmu=previous.get('metric_pmu',{}) if previous.get('xsai')==str(xsai) else {})
  if not a.pmu:(out/'pmu_disabled.h').write_text('static inline void pmu_begin(void){}\nstatic inline void pmu_end(unsigned long n){(void)n;}\n')
  recipes=json.loads((ROOT/'templates/commands.json').read_text());log=[]
  def execute(cmd):
-  log.append(cmd);q=shell(cmd,b);save(out/'build-commands.json',log);assert q.returncode==0,'Build failed; do not run stale binaries'
+  log.append(cmd);q=shell(cmd,b);save(out/'build-commands.json',log)
+  if q.returncode:raise BenchError('Build failed; run doctor for missing targets. This build is not marked ready.')
  def expand(cmd):
   result=[]
   for arg in cmd:
    if '{dependency}' in arg:
     name=arg.rsplit('/',1)[1];matches=list(b.rglob(name))
     if not matches:
-     sources=list(xsai.rglob(name[:-2]));assert len(sources)==1,f'Cannot locate source for {name}'
+     sources=list(xsai.rglob(name[:-2]))
+     if len(sources)!=1:raise BenchError(f'Cannot unambiguously locate source for {name}')
      dep=out/name;execute([a.cc,*flags(b/'CMakeFiles/PHY_NR.dir/flags.make'),'-I'+str(sources[0].parent),'-c',str(sources[0]),'-o',str(dep)]);matches=[dep]
     arg=str(matches[0])
    for key in ['xsai','build','src','out']:arg=arg.replace('{'+key+'}',c[key])
    if arg.endswith('/pmu_cycles.h') and not a.pmu:arg=str(out/'pmu_disabled.h')
    if arg.endswith('/libMAC_UE_NR.a') and not P(arg).exists():
-    archive=out/'libMAC_UE_NR.a'
-    if not archive.exists():
-     recipe=shlex.split((b/'CMakeFiles/MAC_UE_NR.dir/link.txt').read_text().splitlines()[0]);objects=[]
+    archive=out/'libMAC_UE_NR.a';manifest=out/'mac-cache.json'
+    recipe=shlex.split((b/'CMakeFiles/MAC_UE_NR.dir/link.txt').read_text().splitlines()[0])
+    inputs=[b/'CMakeFiles/MAC_UE_NR.dir/flags.make',b/'CMakeFiles/MAC_UE_NR.dir/link.txt']
+    for token in recipe:
+     if token.endswith('.o'):
+      inputs.append(b/token if (b/token).exists() else xsai/token.split('.dir/',1)[1][:-2])
+    fingerprint={str(p.resolve()):[p.stat().st_size,p.stat().st_mtime_ns] for p in inputs};fingerprint['compiler']=a.cc
+    if not archive.exists() or not manifest.exists() or json.loads(manifest.read_text())!=fingerprint:
+     objects=[]
      for token in recipe:
       if not token.endswith('.o'):continue
       obj=b/token
       if not obj.exists():
        rel=token.split('.dir/',1)[1][:-2];source=xsai/rel;obj=out/('mac-'+source.name+'.o');execute([a.cc,*flags(b/'CMakeFiles/MAC_UE_NR.dir/flags.make'),'-I'+str(source.parent),'-c',str(source),'-o',str(obj)])
       objects.append(str(obj))
-     execute(['ar','rcs',str(archive),*objects])
+     execute(['ar','rcs',str(archive),*objects]);save(manifest,fingerprint)
     arg=str(archive)
    result.append(arg)
+  if '-c' in result:result.append('-UNDEBUG')
   result[0]=a.cc if '-c' in result else ('c++' if '++' in result[0] else result[0])
   return result
- keys=list(PAIRS) if a.only=='all' else [x if x!='idft' else 'dft' for x in a.only.split(',')]
+ # validated above
  for key in dict.fromkeys(keys):
   if key=='dft':
    cc=expand(recipes[14]);i=cc.index('-o');cc[i+1]=str(out/'parallel_fft.o');cc=[str(ROOT/'src/parallel_fft.c') if x==str(ROOT/'src/adapter.c') else x for x in cc];execute(cc)
@@ -60,55 +80,141 @@ def build(a):
   execute(link)
   c['metric_pmu'][key]=a.pmu if key!='dft' else False
   if key=='dft':c['metric_pmu']['idft']=False
+  ready[key]={p.name:sha(p) for p in (ROOT/'src').iterdir() if p.is_file()};save(ready_file,ready);save(ROOT/'config.local.json',c)
   if key=='DL':print('DL uses your local libldpc.so; no private adaptive library is bundled.')
  save(ROOT/'config.local.json',c);save(out/'provenance.json',dict(config=c,libdfts_sha256=sha(b/'libdfts.so'),sources={p.name:sha(p) for p in (ROOT/'src').iterdir() if p.is_file()}))
+
+def doctor(a):
+ xsai=P(a.xsai).resolve();b=P(a.build).resolve() if a.build else xsai/'cmake_targets/ran_build/build';missing=[]
+ print('Source:',xsai);print('Build:',b);print('Compiler:',shutil.which(a.cc))
+ if not shutil.which(a.cc):missing.append(a.cc)
+ for name,target in {'libdfts.so':'dfts','libMAC_UE_NR.a':'MAC_UE_NR','libSCHED_NR_UE_LIB.a':'SCHED_NR_UE_LIB','libL2_NR.a':'L2_NR','libnr_ue_phy_meas.a':'nr_ue_phy_meas','libplugins_plugins.a':'plugins_plugins'}.items():
+  found=(b/name).is_file() or any(b.glob('**/'+name));print(('OK ' if found else 'MISSING ')+name)
+  if not found and name=='libMAC_UE_NR.a' and (b/'CMakeFiles/MAC_UE_NR.dir/link.txt').exists():print('  will construct a private archive inside benchmark/build');continue
+  if not found:missing.append(name);print('  repair:',shlex.join(['cmake','--build',str(b),'--target',target,'-j','8']))
+ if not (b/'CMakeFiles/PHY_NR.dir/flags.make').exists():missing.append('PHY_NR flags.make (Unix Makefiles required)')
+ if hasattr(os,'sched_getaffinity'):print('Allowed CPUs:',sorted(os.sched_getaffinity(0)))
+ print('ASN.1: apt asn1c 0.9.28 lacks -gen-APER; follow your XSAI setup. Build required NR targets if unrelated LTE/SSE targets fail.')
+ print('Neural requires an external ABI-compatible plugin and weights; required CPU type depends on that plugin.')
+ if missing:raise BenchError('Preflight incomplete: '+', '.join(missing))
+ print('Preflight passed; actual source/API compatibility is checked by build.')
+
+
+def source_signature(key):
+ sources={'estimation':['standalone.c'],'measurement':['standalone.c'],'symbol':['standalone.c'],'llr':['random_llr.c'],'neural':['random_neural.c'],'UL':['nr_ulschsim.c'],'DL':['nr_dlschsim.c'],'dft':['bench.c','adapter.c','parallel_fft.c']}
+ files=[ROOT/'src'/name for name in sources[key]]+list((ROOT/'src').glob('*.h'))
+ return {p.name:sha(p) for p in files}
+
 def run(a):
- c=config();b=P(c['build']);cpus=a.cpus or ('7' if a.threads==1 else '0-7');allowed=[]
- for part in cpus.split(','):
-  if '-' in part:lo,hi=map(int,part.split('-'));allowed.extend(range(lo,hi+1))
-  else:allowed.append(int(part))
- assert len(set(allowed))>=a.threads,'CPU set too small';assert sorted(allowed)==list(range(min(allowed),max(allowed)+1)),'Use a contiguous CPU range'
- binary=ROOT/'build'/NAMES[a.metric];assert binary.exists(),'Build this metric first'
- env=os.environ.copy();env.update(LD_LIBRARY_PATH=str(b),RANDOM_SEED=str(a.seed),OAI_RNGSEED=str(a.seed),RANDOM_CPU_START=str(min(allowed)),RANDOM_CPU_COUNT=str(len(allowed)))
- n=0 if a.threads==1 else 8
- if a.metric in ['estimation','measurement','symbol']:args=[str(a.seed),str(n),str(a.seconds)]
- elif a.metric=='llr':args=[str(a.seed),str(a.seconds)]
- elif a.metric in ['UL','DL']:
-  env.update(CODING_WORKERS=str(n),CODING_REPEATS='110');args=['-n','110' if a.metric=='UL' else '3','-s','20','-S','20.01','-r','50','-R','106','-m','14','-l','13']
+ if not hasattr(os,'sched_getaffinity'):raise BenchError('Running requires Linux/RISC-V')
+ if a.seconds is not None and (not math.isfinite(a.seconds) or a.seconds<=0 or a.metric in ('UL','DL','dft','idft')):raise BenchError('--seconds is only for PUSCH/LLR/neural; use --trials for UL/DL, --iterations for DFT')
+ if a.input_bank<1 or a.input_bank>16:raise BenchError('--input-bank must be 1..16')
+ if a.metric in ('UL','DL') and a.input_bank!=1:raise BenchError('Input banks are not supported for UL/DL')
+ if a.metric not in ('UL','DL') and any(v is not None for v in (a.rb,a.carrier_rb,a.mcs,a.symbols,a.snr,a.trials)):raise BenchError('Radio/trial parameters apply only to UL/DL')
+ if a.metric not in ('dft','idft') and (a.verify!='strict' or a.iterations!=10000 or a.batches!=7):raise BenchError('Verification/iteration/batch options apply only to DFT/IDFT')
+ for value,name,lo,hi in [(a.rb,'rb',1,106),(a.carrier_rb,'carrier-rb',1,106),(a.mcs,'mcs',0,28),(a.symbols,'symbols',1,13),(a.trials,'trials',1,100000),(a.iterations,'iterations',1,10000000),(a.batches,'batches',1,1000)]:
+  if value is not None and not lo<=value<=hi:raise BenchError(f'--{name} must be in [{lo}, {hi}]')
+ if (a.rb or 50)>(a.carrier_rb or 106):raise BenchError('--rb cannot exceed --carrier-rb')
+ if not 0<=a.seed<=4294967295:raise BenchError('--seed must fit uint32')
+ if a.snr is not None and not math.isfinite(a.snr):raise BenchError('--snr must be finite')
+ c=config();b=P(c['build']);allowed=select_cpus(a.cpus,a.threads);cpus=','.join(map(str,allowed))
+ binary=ROOT/'build'/NAMES[a.metric];key='dft' if a.metric=='idft' else a.metric
+ ready_file=ROOT/'build/ready.json';ready=json.loads(ready_file.read_text()) if ready_file.exists() else {}
+ if not binary.exists() or any(ready.get(key,{}).get(name)!=digest for name,digest in source_signature(key).items()):raise BenchError('Missing/stale/failed binary; rebuild --only '+key)
+ notes=[]
+ serial=a.metric in ('estimation','measurement','llr')
+ if serial and a.threads>1:notes.append('This 1Rx module is serial; eight requested threads do not create eight-way parallelism.')
+ if len(allowed)<a.threads and not serial:notes.append('Oversubscribed workers may reduce performance.')
+ if a.metric=='neural':notes.append('Plugin controls parallelism; --threads does not parallelize a serial plugin.')
+ for note in notes:print('NOTE:',note)
+ n=0 if a.threads==1 or serial else 8
+ warmup=a.warmup if a.warmup is not None else (10 if a.metric in ('UL','DL') else (10000 if a.metric in ('dft','idft') else (1000 if a.metric=='llr' else 20)))
+ if warmup<0:raise BenchError('--warmup must be >= 0')
+ env=os.environ.copy();env.update(LD_LIBRARY_PATH=str(b)+(':'+env['LD_LIBRARY_PATH'] if env.get('LD_LIBRARY_PATH') else ''),RANDOM_SEED=str(a.seed),OAI_RNGSEED=str(a.seed),BENCH_CPU_LIST=cpus,RANDOM_CPU_START=str(min(allowed)),RANDOM_CPU_COUNT=str(len(allowed)),BENCH_INPUT_BANK=str(a.input_bank),BENCH_WARMUP=str(warmup))
+ if a.metric in ('estimation','measurement','symbol'):args=[str(a.seed),str(n),str(a.seconds or 1.5)]
+ elif a.metric=='llr':args=[str(a.seed),str(a.seconds or 1.5)]
+ elif a.metric in ('UL','DL'):
+  total=warmup+(a.trials or 100);snr=20. if a.snr is None else a.snr
+  env.update(CODING_WORKERS=str(n),CODING_REPEATS=str(total),CODING_WARMUP=str(warmup))
+  args=['-n',str(total) if a.metric=='UL' else '3','-s',str(snr),'-S',str(snr+0.01),'-r',str(a.rb or 50),'-R',str(a.carrier_rb or 106),'-m',str(a.mcs if a.mcs is not None else 14),'-l',str(a.symbols or 13)]
   if a.metric=='DL':args+=['-X','n' if n==0 else ','.join(['-1']*8)]
  elif a.metric=='neural':
-  assert a.library and a.weights,'Provide --library and --weights; they are not distributed';lib=str(P(a.library).resolve());weights=str(P(a.weights).resolve());assert P(lib).is_file() and P(weights).is_file()
-  env.update(NATIVE_TEST_LIB=lib,OAI_NRX_WEIGHTS=weights,OAI_NRX_OUT_SCALE='4',OAI_NRX_RX_SCALE='1',XSAI_RECEIVER_NATIVE_WEIGHTS=weights,XSAI_RECEIVER_LLR_GAIN='4',XSAI_RECEIVER_H_INTERP='1');args=[str(a.seed),str(a.seconds)]
- else:env['COOP_EIGHT']='1' if n else '0';args=[a.metric,str(a.seed)]
+  if not a.library or not a.weights:raise BenchError('Provide external --library and --weights')
+  lib=str(P(a.library).resolve());weights=str(P(a.weights).resolve())
+  if not P(lib).is_file() or not P(weights).is_file():raise BenchError('Plugin or weight file does not exist')
+  env.update(NATIVE_TEST_LIB=lib,OAI_NRX_WEIGHTS=weights,OAI_NRX_OUT_SCALE='4',OAI_NRX_RX_SCALE='1',XSAI_RECEIVER_NATIVE_WEIGHTS=weights,XSAI_RECEIVER_LLR_GAIN='4',XSAI_RECEIVER_H_INTERP='1');args=[str(a.seed),str(a.seconds or 1.5)]
+ else:
+  env.update(COOP_EIGHT='1' if n else '0',BENCH_VERIFY=a.verify,BENCH_ITERATIONS=str(a.iterations),BENCH_BATCHES=str(a.batches));args=[a.metric,str(a.seed)]
  cmd=['taskset','-c',cpus,str(binary),*args]
- if a.launcher:cmd.insert(0,str(P(a.launcher).resolve()))
- if a.print_command:print(shlex.join(cmd));print(json.dumps({k:v for k,v in env.items() if os.environ.get(k)!=v},indent=2));return
- out=P(a.out).resolve() if a.out else ROOT/'results'/(datetime.datetime.now().strftime('%Y%m%d-%H%M%S')+'-'+a.metric+'-'+uuid.uuid4().hex[:6]);out.mkdir(parents=True,exist_ok=False)
- lock=open('/tmp/k3-module-benchmark.lock','w');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
- policy=P(f'/sys/devices/system/cpu/cpu{min(allowed)}/cpufreq');original=None;p=None
- meta=dict(metric=a.metric,threads=a.threads,cpus=cpus,seed=a.seed,config=c,argv=cmd,env={k:v for k,v in env.items() if os.environ.get(k)!=v},frequency_before_khz=(policy/'scaling_cur_freq').read_text().strip() if policy.exists() else None,pmu=c.get('metric_pmu',{}).get(a.metric,False),kernel=subprocess.check_output(['uname','-a'],text=True).strip(),libdfts_sha256=sha(b/'libdfts.so'))
- try:
-  if a.freq:
-   assert str(a.freq) in (policy/'scaling_available_frequencies').read_text().split(),'Unsupported frequency';original=(policy/'scaling_setspeed').read_text().strip();(policy/'scaling_setspeed').write_text(str(a.freq)+'\n');assert (policy/'scaling_cur_freq').read_text().strip()==str(a.freq)
-  save(out/'metadata.json',meta)
-  with (out/'run.log').open('w') as f:
-   p=subprocess.Popen(cmd,cwd=out,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
-   for line in p.stdout:print(line,end='',flush=True);f.write(line)
-   rc=p.wait()
-  assert rc==0,f'Benchmark failed ({rc}), see run.log'
-  if a.freq:assert (policy/'scaling_cur_freq').read_text().strip()==str(a.freq),'Frequency changed during measurement'
-  text=(out/'run.log').read_text();parsed=[dict(re.findall(r'(\w+)=([^\s]+)',line)) for line in text.splitlines() if line.startswith(('[RESULT]','[CODING_UL]','[CODING_DL]','[PMU_CYCLES]'))];assert parsed,'Missing result records'
-  save(out/'results.json',parsed)
-  with (out/'results.csv').open('w',newline='') as f:
-   columns=sorted(set().union(*(z.keys() for z in parsed)));w=csv.DictWriter(f,fieldnames=columns);w.writeheader();w.writerows(parsed)
- finally:
-  if p and p.poll() is None:p.terminate();p.wait(timeout=10)
-  if original is not None:(policy/'scaling_setspeed').write_text(original+'\n')
-  meta['frequency_after_khz']=(policy/'scaling_cur_freq').read_text().strip() if policy.exists() else None;save(out/'metadata.json',meta)
+ if a.launcher:
+  if not P(a.launcher).is_file():raise BenchError('Launcher does not exist')
+  cmd.insert(0,str(P(a.launcher).resolve()))
+ changes={k:v for k,v in env.items() if os.environ.get(k)!=v}
+ if a.print_command:print(shlex.join(cmd));print(json.dumps(changes,indent=2));return
+ with benchmark_lock(wait=a.wait_lock),fixed_frequency(allowed,a.freq) as before:
+  out=P(a.out).resolve() if a.out else ROOT/'results'/(datetime.datetime.now().strftime('%Y%m%d-%H%M%S')+'-'+a.metric+'-'+uuid.uuid4().hex[:6]);out.mkdir(parents=True,exist_ok=False)
+  meta=dict(status='running',metric=a.metric,threads_requested=a.threads,workers_configured=n,cpus=cpus,seed=a.seed,config=c,argv=cmd,env=changes,notes=notes,frequency_before=before,pmu=c.get('metric_pmu',{}).get(a.metric,False),kernel=subprocess.check_output(['uname','-a'],text=True).strip(),libdfts_sha256=sha(b/'libdfts.so'),warmup_calls=warmup,input_bank=a.input_bank,cache_protocol='fixed-input warm-cache steady state' if a.input_bank==1 else 'cycling pregenerated bank; not guaranteed cold-cache')
+  if a.metric=='neural':meta.update(plugin_sha256=sha(a.library),weights_sha256=sha(a.weights))
+  save(out/'metadata.json',meta);p=None
+  try:
+   with (out/'run.log').open('w') as f:
+    p=subprocess.Popen(cmd,cwd=out,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+    for line in p.stdout:print(line,end='',flush=True);f.write(line)
+    rc=p.wait()
+   meta['returncode']=rc
+   if rc:raise BenchError(f'Benchmark failed ({rc}), see {out}/run.log')
+   if a.freq:check_frequency(allowed,a.freq)
+   raw,parsed=records((out/'run.log').read_text(),warmup)
+   if not parsed:raise BenchError('Missing result records')
+   for row in raw:
+    if row['record_type']=='RESULT' and 'verification_scope' not in row:row['verification_scope']='serial_same_implementation' if a.metric in ('estimation','measurement','symbol') else 'repeatability_same_implementation'
+    elif row['record_type']=='CODING_UL':row['verification_scope']='random_llr_not_decode_correctness'
+    elif row['record_type']=='CODING_DL':row['verification_scope']='repeatability_same_payload'
+   save(out/'results.raw.json',raw);write_csv(out/'results.raw.csv',raw);save(out/'results.json',parsed);write_csv(out/'results.csv',parsed)
+   report=summary(parsed);save(out/'summary.json',report);print(json.dumps(report,indent=2));meta['status']='passed'
+  except BaseException as exc:meta['status']='failed';meta['error']=str(exc);raise
+  finally:
+   if p and p.poll() is None:p.terminate();p.wait(timeout=10)
+   meta['frequency_after']=frequency_snapshot(allowed);save(out/'metadata.json',meta)
  print('Results:',out)
+
+
+
+def sweep(a):
+ specs=json.loads(P(a.file).read_text())
+ if not isinstance(specs,list) or not specs:raise BenchError('Sweep file must be a nonempty JSON list')
+ # Validate CLI syntax for every entry before executing any benchmark.
+ parser=make_parser();commands=[]
+ for spec in specs:
+  if not isinstance(spec,dict) or 'metric' not in spec or 'threads' not in spec:raise BenchError('Each sweep entry needs metric and threads')
+  argv=['run',str(spec['metric'])]
+  for key,value in spec.items():
+   if key=='metric':continue
+   flag='--'+key.replace('_','-')
+   if isinstance(value,bool):
+    if value:argv.append(flag)
+   elif value is not None:argv.extend([flag,str(value)])
+  commands.append(parser.parse_args(argv))
+ for args in commands:run(args)
+
+def locked_build(a):
+ with benchmark_lock():build(a)
+
+def make_parser():
+ ap=argparse.ArgumentParser(description=__doc__);sp=ap.add_subparsers(dest='command',required=True)
+ for name in ('doctor','build'):
+  b=sp.add_parser(name);b.add_argument('--xsai',required=True);b.add_argument('--build');b.add_argument('--cc',default='gcc-16')
+  if name=='build':b.add_argument('--only',default='all');b.add_argument('--pmu',action='store_true')
+ r=sp.add_parser('run');r.add_argument('metric',choices=NAMES);r.add_argument('--threads',type=int,choices=[1,8],required=True);r.add_argument('--cpus');r.add_argument('--freq',type=int);r.add_argument('--seed',type=int,default=20261022);r.add_argument('--seconds',type=float);r.add_argument('--library');r.add_argument('--weights');r.add_argument('--launcher');r.add_argument('--out');r.add_argument('--print-command',action='store_true');r.add_argument('--wait-lock',action='store_true')
+ for opt in ('warmup','rb','carrier-rb','mcs','symbols','trials'):r.add_argument('--'+opt,type=int)
+ r.add_argument('--snr',type=float);r.add_argument('--input-bank',type=int,default=1);r.add_argument('--iterations',type=int,default=10000);r.add_argument('--batches',type=int,default=7)
+ r.add_argument('--verify',choices=['strict','report','skip'],default='strict');r.add_argument('--skip-verify',dest='verify',action='store_const',const='skip')
+ sw=sp.add_parser('sweep');sw.add_argument('file',help='JSON list of run argument dictionaries')
+ return ap
+
 def main():
- ap=argparse.ArgumentParser();sp=ap.add_subparsers(dest='command',required=True)
- b=sp.add_parser('build');b.add_argument('--xsai',required=True);b.add_argument('--build');b.add_argument('--cc',default='gcc-16');b.add_argument('--only',default='all');b.add_argument('--pmu',action='store_true')
- r=sp.add_parser('run');r.add_argument('metric',choices=NAMES);r.add_argument('--threads',type=int,choices=[1,8],required=True);r.add_argument('--cpus');r.add_argument('--freq',type=int);r.add_argument('--seed',type=int,default=20261022);r.add_argument('--seconds',type=float,default=1.5);r.add_argument('--library');r.add_argument('--weights');r.add_argument('--launcher');r.add_argument('--out');r.add_argument('--print-command',action='store_true')
- a=ap.parse_args();build(a) if a.command=='build' else run(a)
-if __name__=='__main__':main()
+ a=make_parser().parse_args()
+ try: {'doctor':doctor,'build':locked_build,'run':run,'sweep':sweep}[a.command](a)
+ except (BenchError,AssertionError,OSError,ValueError,KeyError) as exc:print('ERROR:',exc,file=sys.stderr);return 2
+ return 0
+if __name__=='__main__':sys.exit(main())

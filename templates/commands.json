@@ -251,8 +251,8 @@
     "common/utils/actor/libactor.a",
     "-ldl",
     "-lrt",
-    "-lgcc_s_asneeded",
-    "-lgcc_s_asneeded"
+    "-lgcc_s",
+    "-lgcc_s"
   ],
   [
     "gcc-16",
@@ -506,8 +506,8 @@
     "common/utils/actor/libactor.a",
     "-ldl",
     "-lrt",
-    "-lgcc_s_asneeded",
-    "-lgcc_s_asneeded"
+    "-lgcc_s",
+    "-lgcc_s"
   ],
   [
     "gcc-16",
@@ -761,8 +761,8 @@
     "common/utils/actor/libactor.a",
     "-ldl",
     "-lrt",
-    "-lgcc_s_asneeded",
-    "-lgcc_s_asneeded"
+    "-lgcc_s",
+    "-lgcc_s"
   ],
   [
     "gcc-16",
@@ -1016,8 +1016,8 @@
     "common/utils/actor/libactor.a",
     "-ldl",
     "-lrt",
-    "-lgcc_s_asneeded",
-    "-lgcc_s_asneeded"
+    "-lgcc_s",
+    "-lgcc_s"
   ],
   [
     "gcc-16",
@@ -1271,8 +1271,8 @@
     "common/utils/actor/libactor.a",
     "-ldl",
     "-lrt",
-    "-lgcc_s_asneeded",
-    "-lgcc_s_asneeded"
+    "-lgcc_s",
+    "-lgcc_s"
   ],
   [
     "gcc-16",
@@ -1487,8 +1487,8 @@
     "common/utils/actor/libactor.a",
     "-ldl",
     "-lrt",
-    "-lgcc_s_asneeded",
-    "-lgcc_s_asneeded"
+    "-lgcc_s",
+    "-lgcc_s"
   ],
   [
     "gcc-16",
@@ -1701,8 +1701,8 @@
     "common/utils/actor/libactor.a",
     "-ldl",
     "-lrt",
-    "-lgcc_s_asneeded",
-    "-lgcc_s_asneeded"
+    "-lgcc_s",
+    "-lgcc_s"
   ],
   [
     "gcc-16",
@@ -2083,7 +2083,7 @@
     "common/utils/actor/libactor.a",
     "-ldl",
     "-lrt",
-    "-lgcc_s_asneeded",
-    "-lgcc_s_asneeded"
+    "-lgcc_s",
+    "-lgcc_s"
   ]
 ]

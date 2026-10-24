@@ -3,3 +3,4 @@
 /config.local.json
 __pycache__/
 *.pyc
+\n/smoke-results.json\n/core\n/core.*\n

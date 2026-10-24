@@ -1689,16 +1689,22 @@ static void run_llr(tb_context_t*c,int32_t*mag,int16_t*out){
                            symbol,
                            rel15_ul->qam_mod_order);
   stop_meas(llr_stats);}
- int main(int argc,char**argv){logInit();set_glog(OAILOG_ERR);cpu_meas_enabled=1;
- uint32_t seed=argc>1?strtoul(argv[1],NULL,0):20261022,rng=seed;double seconds=argc>2?atof(argv[2]):1.5;
+
+int main(int argc,char**argv){logInit();set_glog(OAILOG_ERR);cpu_meas_enabled=1;
+ uint32_t seed=argc>1?strtoul(argv[1],NULL,0):20261022,rng=seed?seed:1;double seconds=argc>2?atof(argv[2]):1.5;
+ int bank=getenv("BENCH_INPUT_BANK")?atoi(getenv("BENCH_INPUT_BANK")):1,warmup=getenv("BENCH_WARMUP")?atoi(getenv("BENCH_WARMUP")):1000;AssertFatal(bank>=1&&bank<=16,"input bank");
  tb_context_t*c=tb_random(seed,50);c->g->pusch_vars->ul_valid_re_per_slot[0]=600;
- int32_t*mag=tb_alloc(608*sizeof(int32_t));int16_t*out=tb_alloc(2432*sizeof(int16_t)),*ref=tb_alloc(2432*sizeof(int16_t));
- int16_t*rx=(int16_t*)c->g->pusch_vars->rxdataF_comp[0];for(int i=0;i<1216;i++){rx[i]=(tb_rng(&rng)&4095)-2048;((int16_t*)mag)[i]=1+(tb_rng(&rng)&2047);}
- run_llr(c,mag,ref);for(int i=0;i<1000;i++)run_llr(c,mag,out);
- uint64_t input=tb_digest(rx,1216*sizeof(int16_t))^tb_digest(mag,608*sizeof(int32_t));
- printf("[RANDOM_INPUT] seed=%u source=xorshift32 file_reads=0 re=600 qm=4 input_hash=%llu\n",seed,(unsigned long long)input);
+ int32_t*mag[16],*rx[16];int16_t*ref[16],*out[16];
+ for(int k=0;k<bank;k++){mag[k]=tb_alloc(608*sizeof(int32_t));rx[k]=tb_alloc(c->comp_count*sizeof(c16_t));ref[k]=tb_alloc(2432*sizeof(int16_t));out[k]=tb_alloc(2432*sizeof(int16_t));
+  for(int i=0;i<1216;i++){((int16_t*)rx[k])[i]=(tb_rng(&rng)&4095)-2048;((int16_t*)mag[k])[i]=1+(tb_rng(&rng)&2047);}
+  c->g->pusch_vars->rxdataF_comp[0]=rx[k];run_llr(c,mag[k],ref[k]);
+ }
+ for(int i=0;i<warmup;i++){int k=i%bank;c->g->pusch_vars->rxdataF_comp[0]=rx[k];run_llr(c,mag[k],out[k]);}
+ uint64_t input=tb_digest(rx[0],1216*sizeof(int16_t))^tb_digest(mag[0],608*sizeof(int32_t));
+ printf("[RANDOM_INPUT] seed=%u source=xorshift32 file_reads=0 re=600 qm=4 input_bank=%d input_hash=%llu\n",seed,bank,(unsigned long long)input);
  unsigned calls=0;double wall=0,begin=tb_clock(CLOCK_MONOTONIC_RAW),cpu0=tb_clock(CLOCK_PROCESS_CPUTIME_ID);
- do{pmu_begin();double t=tb_clock(CLOCK_MONOTONIC_RAW);for(int i=0;i<128;i++)run_llr(c,mag,out);wall+=tb_clock(CLOCK_MONOTONIC_RAW)-t;pmu_end(128);calls+=128;}while(tb_clock(CLOCK_MONOTONIC_RAW)-begin<seconds);
- double window=tb_clock(CLOCK_MONOTONIC_RAW)-begin,cpu=tb_clock(CLOCK_PROCESS_CPUTIME_ID)-cpu0;AssertFatal(!memcmp(ref,out,2400*sizeof(int16_t)),"LLR mismatch");
- printf("[RESULT] calls=%u mean_us=%.9f cores=%.9f verified=1 input_hash=%llu output_hash=%llu\n",calls,wall*1e6/calls,cpu/window,(unsigned long long)input,(unsigned long long)tb_digest(out,4800));return 0;}
- 
+ do{pmu_begin();double t=tb_clock(CLOCK_MONOTONIC_RAW);for(int i=0;i<128;i++){int k=(calls+i)%bank;c->g->pusch_vars->rxdataF_comp[0]=rx[k];run_llr(c,mag[k],out[k]);}wall+=tb_clock(CLOCK_MONOTONIC_RAW)-t;pmu_end(128);calls+=128;}while(tb_clock(CLOCK_MONOTONIC_RAW)-begin<seconds);
+ double window=tb_clock(CLOCK_MONOTONIC_RAW)-begin,cpu=tb_clock(CLOCK_PROCESS_CPUTIME_ID)-cpu0;int verified=1;
+ for(int k=0;k<bank;k++)if(memcmp(ref[k],out[k],2400*sizeof(int16_t)))verified=0;AssertFatal(verified,"LLR mismatch");
+ printf("[RESULT] calls=%u mean_us=%.9f cores=%.9f verified=%d input_bank=%d input_hash=%llu output_hash=%llu\n",calls,wall*1e6/calls,cpu/window,verified,bank,(unsigned long long)input,(unsigned long long)tb_digest(out[0],4800));return 0;
+}

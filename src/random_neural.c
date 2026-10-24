@@ -1645,8 +1645,10 @@ static uint64_t tb_digest(const void*ptr,size_t n){const unsigned char*p=ptr;uin
 #include <unistd.h>
 #include <dirent.h>
 static void constrain_threads(void){
- const char*cp=getenv("RANDOM_CPU_START");if(!cp)return;int first=atoi(cp),n=atoi(getenv("RANDOM_CPU_COUNT"));cpu_set_t mask;CPU_ZERO(&mask);for(int i=0;i<n;i++)CPU_SET(first+i,&mask);
- DIR*d=opendir("/proc/self/task");struct dirent*e;while((e=readdir(d))){int tid=atoi(e->d_name);if(tid>0)AssertFatal(sched_setaffinity(tid,sizeof(mask),&mask)==0,"affinity");}closedir(d);
+ cpu_set_t mask;CPU_ZERO(&mask);const char*list=getenv("BENCH_CPU_LIST");
+ if(list){char*copy=strdup(list),*token=strtok(copy,",");while(token){int cpu=atoi(token);AssertFatal(cpu>=0&&cpu<CPU_SETSIZE,"CPU out of range");CPU_SET(cpu,&mask);token=strtok(NULL,",");}free(copy);}
+ else {const char*cp=getenv("RANDOM_CPU_START");if(!cp)return;int first=atoi(cp),n=atoi(getenv("RANDOM_CPU_COUNT"));for(int i=0;i<n;i++)CPU_SET(first+i,&mask);}
+ DIR*d=opendir("/proc/self/task");AssertFatal(d,"cannot enumerate plugin threads");struct dirent*e;while((e=readdir(d))){int tid=atoi(e->d_name);if(tid>0)AssertFatal(sched_setaffinity(tid,sizeof(mask),&mask)==0,"affinity");}closedir(d);
 }
 static receiver_compute_llrfunc_t *random_fn;
 static int random_callback(tb_context_t*c){
@@ -1655,16 +1657,21 @@ static int random_callback(tb_context_t*c){
 }
 int main(int argc,char**argv){
  logInit();set_glog(OAILOG_ERR);cpu_meas_enabled=1;load_dftslib();uint32_t seed=argc>1?strtoul(argv[1],NULL,0):20261022;double seconds=argc>2?atof(argv[2]):1.5;
- tb_context_t*c=tb_random(seed,24);NR_gNB_PUSCH*v=c->g->pusch_vars;int off=0;for(int i=0;i<14;i++){v->llr_offset[i]=off;off+=v->ul_valid_re_per_slot[i]*4;}
+ int bank=getenv("BENCH_INPUT_BANK")?atoi(getenv("BENCH_INPUT_BANK")):1;AssertFatal(bank>=1&&bank<=16,"input bank");
+ int warmup=getenv("BENCH_WARMUP")?atoi(getenv("BENCH_WARMUP")):20;
+ tb_context_t*contexts[16];int16_t*references[16];
+ for(int k=0;k<bank;k++){contexts[k]=tb_random(seed+(uint32_t)k*2654435761u,24);NR_gNB_PUSCH*p=contexts[k]->g->pusch_vars;int off=0;for(int i=0;i<14;i++){p->llr_offset[i]=off;off+=p->ul_valid_re_per_slot[i]*4;}}
+ tb_context_t*c=contexts[0];NR_gNB_PUSCH*v=c->g->pusch_vars;
  setenv("OAI_NRX_SAMPLE_MS","0",1);setenv("OAI_NRX_USE_NN","1",1);setenv("OAI_NRX_VERBOSE","0",1);
  void*lib=dlopen(getenv("NATIVE_TEST_LIB"),RTLD_NOW|RTLD_GLOBAL);AssertFatal(lib,"dlopen: %s",dlerror());
  receiver_initfunc_t*init=dlsym(lib,"receiver_init");receiver_initfunc_t*init_thread=dlsym(lib,"receiver_init_thread");random_fn=dlsym(lib,"receiver_compute_llr");AssertFatal(init&&init_thread&&random_fn,"plugin symbols");AssertFatal(init()==0&&init_thread()==0,"plugin init");
- for(int i=0;i<20;i++)AssertFatal(random_callback(c)==1,"neural fallback");constrain_threads();
- int16_t*reference=tb_alloc(c->G*sizeof(int16_t));memcpy(reference,v->llr,c->G*sizeof(int16_t));
+ for(int i=0;i<warmup;i++)AssertFatal(random_callback(c)==1,"neural fallback");constrain_threads();
+ for(int k=0;k<bank;k++){AssertFatal(random_callback(contexts[k])==1,"neural fallback");references[k]=tb_alloc(contexts[k]->G*sizeof(int16_t));memcpy(references[k],contexts[k]->g->pusch_vars->llr,contexts[k]->G*sizeof(int16_t));}
+ int16_t*reference=references[0];
  uint64_t input=tb_digest(c->g->common_vars.rxdataF[0][0],c->rx_count*sizeof(c16_t)),out=tb_digest(reference,c->G*sizeof(int16_t));
  printf("[RANDOM_INPUT] seed=%u rb=24 source=xorshift32 iq_min=-2048 iq_max=2047 file_reads=0 G=%u input_hash=%llu output_hash=%llu\n",seed,c->G,(unsigned long long)input,(unsigned long long)out);
  double wall=0,cpu=0,begin=tb_clock(CLOCK_MONOTONIC_RAW);unsigned calls=0;
- do{pmu_begin();double cpu0=tb_clock(CLOCK_PROCESS_CPUTIME_ID);double t0=tb_clock(CLOCK_MONOTONIC_RAW);int rc=random_callback(c);wall+=tb_clock(CLOCK_MONOTONIC_RAW)-t0;cpu+=tb_clock(CLOCK_PROCESS_CPUTIME_ID)-cpu0;pmu_end(1);calls++;AssertFatal(rc==1,"fallback");if(!(calls&255))AssertFatal(!memcmp(reference,v->llr,c->G*sizeof(int16_t)),"output changed");}while(tb_clock(CLOCK_MONOTONIC_RAW)-begin<seconds);
+ do{int index=calls%bank;c=contexts[index];v=c->g->pusch_vars;reference=references[index];pmu_begin();double cpu0=tb_clock(CLOCK_PROCESS_CPUTIME_ID);double t0=tb_clock(CLOCK_MONOTONIC_RAW);int rc=random_callback(c);wall+=tb_clock(CLOCK_MONOTONIC_RAW)-t0;cpu+=tb_clock(CLOCK_PROCESS_CPUTIME_ID)-cpu0;pmu_end(1);calls++;AssertFatal(rc==1,"fallback");if(!(calls&255))AssertFatal(!memcmp(reference,v->llr,c->G*sizeof(int16_t)),"output changed");}while(tb_clock(CLOCK_MONOTONIC_RAW)-begin<seconds);
  AssertFatal(!memcmp(reference,v->llr,c->G*sizeof(int16_t)),"output changed");
- printf("[RESULT] calls=%u mean_us=%.9f cores=%.9f verified=1 input_hash=%llu output_hash=%llu\n",calls,wall*1e6/calls,cpu/wall,(unsigned long long)input,(unsigned long long)out);return 0;
+ printf("[RESULT] calls=%u mean_us=%.9f cores=%.9f verification=passed verification_scope=repeatability_same_implementation input_hash=%llu output_hash=%llu\n",calls,wall*1e6/calls,cpu/wall,(unsigned long long)input,(unsigned long long)out);return 0;
 }

@@ -552,11 +552,11 @@ int main(int argc, char **argv)
       int old_trials=gNB->ts_ldpc_decode.trials;
       double old_total=get_time_meas_us(&gNB->ts_ldpc_decode)*old_trials;
       unsigned long long input_hash=coding_hash(gNB->pusch_vars[UE_id].llr,G*sizeof(int16_t));
-      if(trial>=10)pmu_begin();
+      if(trial>=(getenv("CODING_WARMUP")?atoi(getenv("CODING_WARMUP")):10))pmu_begin();
       double cpu0=coding_clock(CLOCK_PROCESS_CPUTIME_ID),wall0=coding_clock(CLOCK_MONOTONIC_RAW);
       nr_ulsch_decoding(gNB, frame_parms, frame, subframe, &G, &UE_id, 1);
       double wall_us=(coding_clock(CLOCK_MONOTONIC_RAW)-wall0)*1e6,cpu_us=(coding_clock(CLOCK_PROCESS_CPUTIME_ID)-cpu0)*1e6;
-      if(trial>=10)pmu_end(1);
+      if(trial>=(getenv("CODING_WARMUP")?atoi(getenv("CODING_WARMUP")):10))pmu_end(1);
       int segs=gNB->ts_ldpc_decode.trials-old_trials;
       double segment_sum=get_time_meas_us(&gNB->ts_ldpc_decode)*gNB->ts_ldpc_decode.trials-old_total;
       printf("[CODING_UL] trial=%d wall_us=%.6f cpu_us=%.6f segments=%d segment_sum_us=%.6f per_segment_us=%.6f input_hash=%llu output_hash=%llu\n",trial,wall_us,cpu_us,segs,segment_sum,segs?segment_sum/segs:0,input_hash,coding_hash(harq_process_gNB->b,TBS/8));
