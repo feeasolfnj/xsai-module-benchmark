@@ -1,5 +1,7 @@
 # XSAI module benchmark
 
+**先看 [新版完整使用说明](USAGE.md)**：环境检查、非连续CPU集、输入库、UL/DL扫参、预热剔除和DFT校验模式。
+
 在 **K3 Linux / RISC-V RVV** 上，用直接生成的随机输入测试使用者自己的 XSAI PHY 模块。不是 RFsim，不包含完整 XSAI 工程、预编译库、神经网络权重或测试机器的私人日志。
 
 ## 测试项目
@@ -32,6 +34,7 @@ git clone https://github.com/feeasolfnj/xsai-module-benchmark.git
 cd xsai-module-benchmark
 
 # 指向你自己的源码目录；构建目录默认位于它的cmake_targets/ran_build/build
+python3 bench.py doctor --xsai /your/path/to/XSAI
 python3 bench.py build --xsai /your/path/to/XSAI
 
 # 构建目录在其他位置
@@ -96,17 +99,17 @@ DFT/IDFT目前不提供PMU统计，即使启用了此构建选项。PMU计入窗
 | DL编码payload字节 | 0至255 |
 | DFT/IDFT I/Q分量 | -364至364 |
 
-输入生成、配置、分配、状态恢复、校验在计时外。PUSCH和神经网络等默认种子20261022，可设置 `--seed`。UL每trial由该种子派生新输入，其他大部分测试重复处理固定数组。
+输入生成、配置、分配、状态恢复、校验在计时外。PUSCH和神经网络等默认种子20261022，可设置 `--seed`。UL每trial由该种子派生新输入，其他测试默认重复固定数组；PUSCH/LLR/neural/DFT可用 `--input-bank` 轮换2至16组预生成输入。批次中的输入指针/索引切换开销仍计入批次时间。
 
 I/Q与信道数组独立生成，不是相互一致的物理信道样本。随机LLR不对应合法码字，CRC失败为预期，不用于BER/BLER结论。UL含实际的早停、共享中止和数据相关迭代，不能默认单/八线程工作量完全相同。
 
-一致性检查以原串行实现为参考，并不证明原算法本身正确。DFT候选初始化还检查不同输入范围、双方向、双缩放是否与本地原库逐位一致，失败会终止。仓库新增DFT运行器采用100组随机输入复核，不复制外部项目整个测试框架；设计参考了 [dft-idft-benchmark](https://github.com/fuxuandg/dft-idft-benchmark)。
+一致性检查以原串行实现为参考，并不证明原算法本身正确。DFT候选初始化还检查不同输入范围、双方向、双缩放是否与本地原库逐位一致。默认strict失败会终止；report保留失败标记，skip明确标记未验证。串行基线不初始化并行候选。运行器对选定输入库复核，不复制外部项目整个测试框架；设计参考了 [dft-idft-benchmark](https://github.com/fuxuandg/dft-idft-benchmark)。
 
 ## 输出和重复测试
 
 每次新建 `results/<日期-模块-随机后缀>/`，包含run.log、results.json、results.csv、metadata.json。指定目录用 `--out /new/path`，拒绝覆盖已有目录。元数据包含命令、环境、频率、配置和本地libdfts哈希。
 
-`mean_us`为平均耗时；DFT/IDFT `median_us`是7轮批次均值的中位数，不能说成逐次调用耗时的中位数。编译码日志包含110次调用，前10次为预热，统计时剔除。平均用核量为CPU时间/墙钟时间，包含同步自旋；PUSCH重复窗口包含计时外状态恢复/校验，和插件回调窗口的边界不同。
+`mean_us`为平均耗时；DFT/IDFT `median_batch_mean_us`是批次均值的中位数，不能说成逐次调用耗时的中位数。编译码默认100次正式调用、10次预热，均可配置。正式CSV/JSON已剔除预热，raw文件保留全部记录。平均用核量为CPU时间/对应墙钟窗口，包含同步自旋；PUSCH重复窗口包含计时外状态恢复/校验，和插件回调窗口的边界不同。
 
 ```bash
 for seed in 20261022 20261023 20261024; do
@@ -117,7 +120,7 @@ done
 python3 bench.py run dft --threads 8 --print-command
 ```
 
-原始log里会同时保留预热及正式记录；CSV也保留这些行，分析编译码时不能把前10条算成正式样本。频率在finally恢复，进程被SIGKILL或机器断电时无法保证恢复。脚本使用同一进程锁避免多个benchmark竞争。
+原始log和results.raw.csv/json保留预热及正式记录，results.csv/json只保留正式记录；summary.json提供正式统计。频率在finally恢复，进程被SIGKILL或机器断电时无法保证恢复。脚本使用全局锁避免多个benchmark竞争。
 
 ## 已验证范围与限制
 

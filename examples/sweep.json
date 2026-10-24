@@ -1,0 +1,6 @@
+[
+  {"metric": "UL", "threads": 1, "rb": 24, "mcs": 10, "trials": 100, "warmup": 10},
+  {"metric": "UL", "threads": 8, "rb": 24, "mcs": 10, "trials": 100, "warmup": 10},
+  {"metric": "UL", "threads": 1, "rb": 50, "mcs": 14, "trials": 100, "warmup": 10},
+  {"metric": "UL", "threads": 8, "rb": 50, "mcs": 14, "trials": 100, "warmup": 10}
+]
