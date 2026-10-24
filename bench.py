@@ -14,6 +14,21 @@ def config():
  if not (ROOT/'config.local.json').exists():raise BenchError('Run build --xsai /path/to/XSAI first')
  return json.loads((ROOT/'config.local.json').read_text())
 def flags(path):
+ if not path.exists():
+  database=path.parents[2]/'compile_commands.json';target=path.parent.name
+  if not database.exists():raise BenchError(f'Missing {path}; enable CMAKE_EXPORT_COMPILE_COMMANDS=ON in your XSAI CMake build to rebuild missing helpers')
+  for entry in json.loads(database.read_text()):
+   args=entry.get('arguments') or shlex.split(entry['command'])
+   if not any(target+'/' in token for token in args):continue
+   result=[];skip=False
+   for token in args[1:]:
+    if skip:skip=False;continue
+    if token=='-o':skip=True;continue
+    if token=='-c' or token==entry['file']:continue
+    if token.startswith('-I') and not P(token[2:]).is_absolute():token='-I'+str(P(entry['directory'])/token[2:])
+    result.append(token)
+   return result
+  raise BenchError(f'{database}: no compile command found for {target}')
  d={}
  for line in path.read_text().splitlines():
   if ' = ' in line:k,v=line.split(' = ',1);d[k]=shlex.split(v)
@@ -49,9 +64,11 @@ def build(a):
    for key in ['xsai','build','src','out']:arg=arg.replace('{'+key+'}',c[key])
    if arg.endswith('/pmu_cycles.h') and not a.pmu:arg=str(out/'pmu_disabled.h')
    if arg.endswith('/libMAC_UE_NR.a') and not P(arg).exists():
+    if not (b/'CMakeFiles/MAC_UE_NR.dir/link.txt').exists():raise BenchError('Missing MAC archive; run '+shlex.join(['cmake','--build',str(b),'--target','MAC_UE_NR','-j','8']))
     archive=out/'libMAC_UE_NR.a';manifest=out/'mac-cache.json'
     recipe=shlex.split((b/'CMakeFiles/MAC_UE_NR.dir/link.txt').read_text().splitlines()[0])
-    inputs=[b/'CMakeFiles/MAC_UE_NR.dir/flags.make',b/'CMakeFiles/MAC_UE_NR.dir/link.txt']
+    mac_flags=b/'CMakeFiles/MAC_UE_NR.dir/flags.make'
+    inputs=[mac_flags if mac_flags.exists() else b/'compile_commands.json',b/'CMakeFiles/MAC_UE_NR.dir/link.txt']
     for token in recipe:
      if token.endswith('.o'):
       inputs.append(b/token if (b/token).exists() else xsai/token.split('.dir/',1)[1][:-2])
@@ -92,7 +109,7 @@ def doctor(a):
   found=(b/name).is_file() or any(b.glob('**/'+name));print(('OK ' if found else 'MISSING ')+name)
   if not found and name=='libMAC_UE_NR.a' and (b/'CMakeFiles/MAC_UE_NR.dir/link.txt').exists():print('  will construct a private archive inside benchmark/build');continue
   if not found:missing.append(name);print('  repair:',shlex.join(['cmake','--build',str(b),'--target',target,'-j','8']))
- if not (b/'CMakeFiles/PHY_NR.dir/flags.make').exists():missing.append('PHY_NR flags.make (Unix Makefiles required)')
+ if not (b/'CMakeFiles/PHY_NR.dir/flags.make').exists():print('NOTE: no flags.make; missing helper rebuilds require compile_commands.json (CMAKE_EXPORT_COMPILE_COMMANDS=ON). Complete Ninja builds may already contain the helpers.')
  if hasattr(os,'sched_getaffinity'):print('Allowed CPUs:',sorted(os.sched_getaffinity(0)))
  print('ASN.1: apt asn1c 0.9.28 lacks -gen-APER; follow your XSAI setup. Build required NR targets if unrelated LTE/SSE targets fail.')
  print('Neural requires an external ABI-compatible plugin and weights; required CPU type depends on that plugin.')

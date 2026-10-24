@@ -94,6 +94,24 @@ class LauncherTests(unittest.TestCase):
         commands=json.loads((ROOT/'templates/commands.json').read_text())
         self.assertFalse(any('-lgcc_s_asneeded' in command for command in commands))
 
+    def test_ninja_compile_database_flags(self):
+        import json
+        from bench import flags
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            build=pathlib.Path(tmp)
+            (build/'compile_commands.json').write_text(json.dumps([{
+                'directory':str(build),'file':'/source/helper.c',
+                'arguments':['gcc','-DTEST=1','-Irelative','-O2','-o',
+                             'CMakeFiles/PHY_NR.dir/helper.c.o','-c','/source/helper.c']}]))
+            result=flags(build/'CMakeFiles/PHY_NR.dir/flags.make')
+            self.assertEqual(result,['-DTEST=1','-I'+str(build/'relative'),'-O2'])
+
+    def test_missing_compile_database_is_actionable(self):
+        from bench import flags
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            with self.assertRaisesRegex(BenchError,'CMAKE_EXPORT_COMPILE_COMMANDS'):
+                flags(pathlib.Path(tmp)/'CMakeFiles/PHY_NR.dir/flags.make')
+
 
 if __name__ == '__main__':
     unittest.main()

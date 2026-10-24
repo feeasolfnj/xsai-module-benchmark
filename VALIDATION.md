@@ -18,9 +18,9 @@ compatibility with an unrelated third-party XSAI revision.
 - Sparse CPUs `0,2,4,6` completed symbol processing. Unavailable CPU, unsupported
   duration option, and unsupported frequency each produced the expected friendly
   failure. Total: **22 on-device checks passed**.
-- **14 regression tests passed on K3**, including the previous-sudo read-only
+- **16 regression tests passed on K3**, including the previous-sudo read-only
   lock case, warmup filtering, CPU validation, frequency preflight/restoration,
-  and synthetic DFT mismatch handling. In the synthetic host C harness, strict
+  synthetic DFT mismatch handling, and compile_commands.json flag extraction. The actual full build used the existing Makefiles tree; a full third-party Ninja build was not independently repeated. In the synthetic host C harness, strict
   rejects a mismatch, report preserves `verification=failed`, and skip reports
   `verification=skipped`.
 - GitHub Actions passed on Ubuntu and Windows with Python 3.10 and 3.12.
