@@ -3,12 +3,23 @@ import json
 import hashlib
 import pathlib
 import platform
+import re
 import shlex
 import shutil
 
 from bench_support import BenchError
 
 P = pathlib.Path
+
+
+def adapt_statistics(text, header):
+    """Remove only known XSAI instrumentation absent from official gNB headers."""
+    for field in ('ulsch_channel_measurement_stats', 'ulsch_resource_extraction_stats',
+                  'ulsch_channel_compensation_stats'):
+        if not re.search(r'\b' + field + r'\b', header):
+            pattern = r'\b(?:start_meas|stop_meas|merge_meas)\(\s*&gNB->' + field + r'\b[^;\n]*\);'
+            text = re.sub(pattern, '(void)0;', text)
+    return text
 
 
 def source_root(value):
@@ -95,7 +106,9 @@ def link_command(build, target):
     ninja = cache_value(build, 'CMAKE_MAKE_PROGRAM')
     if ninja and 'ninja' in P(ninja).name:
         result = subprocess.run([ninja, '-t', 'commands', target], cwd=build,
-                                capture_output=True, text=True, check=True)
+                                capture_output=True, text=True)
+        if result.returncode:
+            raise BenchError(f'Cannot read Ninja linker recipe for {target}: {result.stderr.strip()}')
         for line in reversed(result.stdout.splitlines()):
             args = shlex.split(line)
             if '-o' not in args or P(args[args.index('-o') + 1]).name != target:
@@ -109,6 +122,8 @@ def link_command(build, target):
 
 
 def module_link(original, obj, output):
+    if not original or '-o' not in original:
+        raise BenchError('Invalid OAI linker recipe; reconfigure the original CMake build')
     result = []
     skip = False
     for token in original:
@@ -118,7 +133,7 @@ def module_link(original, obj, output):
         if token == '-o':
             skip = True
             continue
-        # Drop only the simulator main, not helper objects from other targets.
+        # Replace the simulator main and its glue; retain other target helpers.
         mains = ('ulsim.c.o', 'dlsim.c.o', 'nr_ulschsim.c.o', 'nr_dlschsim.c.o',
                  'softmodem-common.c.o', 'rrc_nsa.c.o', 'nfapi.c.o', 'gnb_ind_vars.c.o', 'queue_t.c.o')
         if P(token).name in mains and any(f'CMakeFiles/{name}.dir/' in token for name in ('nr_ulsim', 'nr_dlsim')):
@@ -200,7 +215,7 @@ def build_official(root, xsai, build, out, cc, keys, execute, pmu=False):
         command.append('-Wl,--end-group')
         return [artifact(x) for x in command]
     (out / 'pmu_disabled.h').write_text('static inline void pmu_begin(void){}\nstatic inline void pmu_end(unsigned n){(void)n;}\n')
-    has_measurement_timer = 'ulsch_channel_measurement_stats' in (xsai / 'openair1/PHY/defs_gNB.h').read_text()
+    gnb_header = (xsai / 'openair1/PHY/defs_gNB.h').read_text()
     for key in keys:
         target = 'nr_dlsim' if key == 'DL' else 'nr_ulsim'
         flag_target = target if key in ('UL', 'DL') else 'PHY_NR'
@@ -221,10 +236,7 @@ def build_official(root, xsai, build, out, cc, keys, execute, pmu=False):
         name = {'estimation': 'standalone.c', 'measurement': 'standalone.c', 'symbol': 'standalone.c',
                 'llr': 'random_llr.c', 'neural': 'random_neural.c', 'UL': 'nr_ulschsim.c', 'DL': 'nr_dlschsim.c'}[key]
         text = (root / 'src' / name).read_text()
-        if not has_measurement_timer:
-            # These statistics are XSAI additions. Module wall-clock timing is independent.
-            text = text.replace('start_meas(&gNB->ulsch_channel_measurement_stats);', '(void)0;')
-            text = text.replace('stop_meas(&gNB->ulsch_channel_measurement_stats);', '(void)0;')
+        text = adapt_statistics(text, gnb_header)
         source = generated / name
         source.write_text(text)
         obj = out / (NAMES[key] + '.o')

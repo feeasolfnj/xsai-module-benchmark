@@ -3,18 +3,46 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from platform_build import source_root, host_arch, compile_flags, module_link, check_library_arch
+from platform_build import source_root, host_arch, compile_flags, module_link, check_library_arch, adapt_statistics, link_command
 from bench_support import BenchError
 
 
 class PlatformBuildTests(unittest.TestCase):
+    def test_ninja_linker_shell_wrappers_and_quoted_paths(self):
+        import subprocess
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            root = pathlib.Path(tmp)
+            (root / 'CMakeCache.txt').write_text('CMAKE_MAKE_PROGRAM:FILEPATH=/usr/bin/ninja\n')
+            result = subprocess.CompletedProcess([], 0, ': && c++ "source with spaces.o" -o nr_ulsim libPHY_NR.a && :\n', '')
+            with patch('subprocess.run', return_value=result):
+                self.assertEqual(link_command(root, 'nr_ulsim'), ['c++', 'source with spaces.o', '-o', 'nr_ulsim', 'libPHY_NR.a'])
+            result.returncode = 1
+            result.stderr = 'unknown target nr_ulsim'
+            with patch('subprocess.run', return_value=result), self.assertRaisesRegex(BenchError, 'Cannot read Ninja'):
+                link_command(root, 'nr_ulsim')
+
+    def test_optional_statistics_do_not_remove_computation(self):
+        text = ('start_meas(&gNB->ulsch_channel_measurement_stats);\n'
+                'nr_gnb_measurements(gNB);\n'
+                'merge_meas(&gNB->ulsch_resource_extraction_stats, &arr[i].resource_extraction_stats);\n'
+                'merge_meas(&gNB->ulsch_channel_compensation_stats, &arr[i].channel_compensation_stats);\n'
+                'stop_meas(&gNB->ulsch_channel_measurement_stats);')
+        adapted = adapt_statistics(text, '')
+        self.assertEqual(adapted.count('(void)0;'), 4)
+        self.assertIn('nr_gnb_measurements(gNB);', adapted)
+        header = 'ulsch_channel_measurement_stats ulsch_resource_extraction_stats ulsch_channel_compensation_stats'
+        self.assertEqual(adapt_statistics(text, header), text)
+
     def test_tensorrt_skipped_inference_is_not_a_passing_benchmark(self):
         from bench import check_neural_log
         for message in ('TensorRT: failed to deserialize engine',
                         'TensorRT: execution context unavailable; skipping receiver decode',
+                        'IExecutionContext::enqueueV3: Error Code 1: Cuda Driver',
+                        'TensorRT: Error Code: 4',
                         'TensorRT: no engine available; cannot create execution context'):
             with self.subTest(message=message), self.assertRaises(BenchError):
                 check_neural_log(message + '\n[RESULT] verification=passed', 'tensorrt')

@@ -1,4 +1,6 @@
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include "bench_module.h"
 #include <assert.h>
 #include <stdio.h>

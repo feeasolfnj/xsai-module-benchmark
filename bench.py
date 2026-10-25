@@ -9,7 +9,7 @@ PAIRS={'estimation':(0,1),'measurement':(2,3),'symbol':(4,5),'neural':(6,7),'llr
 def save(p,x):p.write_text(json.dumps(x,ensure_ascii=False,indent=2))
 def sha(p):return hashlib.sha256(P(p).read_bytes()).hexdigest()
 def check_neural_log(log,backend):
- if backend=='tensorrt' and re.search(r'failed to deserialize engine|no engine available|execution context unavailable|Error Code:\s*[1-9]|CUDA error',log,re.I):
+ if backend=='tensorrt' and re.search(r'failed to deserialize engine|no engine available|execution context unavailable|Error Code\s*:?\s*[1-9]|CUDA error',log,re.I):
   raise BenchError('TensorRT reported an engine/context/inference failure; this timing is invalid. Check run.log and rebuild the engine for this GPU/TensorRT version.')
 def shell(cmd,cwd):
  q=subprocess.run(cmd,cwd=cwd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
