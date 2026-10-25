@@ -1,6 +1,8 @@
 """Optional on-device regression; requires a successful build and local XSAI."""
 import argparse
 import json
+import os
+import signal
 import pathlib
 import subprocess
 import sys
@@ -14,7 +16,14 @@ args=parser.parse_args()
 outcomes=[]
 
 def check(label, argv, expected=0):
-    proc=subprocess.run([sys.executable,str(root/'bench.py'),*argv],capture_output=True,text=True,timeout=180)
+    child=subprocess.Popen([sys.executable,str(root/'bench.py'),*argv],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=True)
+    try:
+        stdout,stderr=child.communicate(timeout=180)
+    except subprocess.TimeoutExpired:
+        os.killpg(child.pid,signal.SIGKILL)
+        child.communicate()
+        raise
+    proc=subprocess.CompletedProcess(child.args,child.returncode,stdout,stderr)
     record={'case':label,'returncode':proc.returncode,'expected':expected}
     if proc.returncode!=expected:
         print(proc.stdout[-4000:]);print(proc.stderr[-2000:]);raise RuntimeError(record)

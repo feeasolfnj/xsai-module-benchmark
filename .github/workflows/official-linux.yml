@@ -12,12 +12,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
-      CCACHE_DIR: ${{ runner.temp }}/ccache
       CCACHE_MAXSIZE: 2G
     steps:
       - uses: actions/checkout@v4
       - name: System dependencies
         run: |
+          echo "CCACHE_DIR=$RUNNER_TEMP/ccache" >> "$GITHUB_ENV"
           sudo apt-get update -qq
           sudo apt-get install -y build-essential ccache cmake ninja-build autoconf automake libtool bison flex libconfig-dev libsctp-dev libssl-dev zlib1g-dev libblas-dev liblapacke-dev libyaml-cpp-dev libsimde-dev libforms-dev libxft-dev libusb-1.0-0-dev libgnutls28-dev libboost-all-dev python3-numpy python3-mako
       - uses: actions/cache/restore@v4
