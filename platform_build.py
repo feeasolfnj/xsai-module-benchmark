@@ -227,7 +227,8 @@ def build_official(root, xsai, build, out, cc, keys, execute, pmu=False):
             objects = []
             for name in ('bench.c', 'adapter.c'):
                 obj = out / (name + '.o')
-                execute([cc, *flags, '-DBENCH_NATIVE_DFT=1', '-c', str(root / 'src' / name), '-o', str(obj)])
+                instrumentation = ['-include', str(header)] if name == 'bench.c' else []
+                execute([cc, *flags, *instrumentation, '-DBENCH_NATIVE_DFT=1', '-c', str(root / 'src' / name), '-o', str(obj)])
                 objects.append(obj)
             command = link(objects[0], out / NAMES[key], target)
             command.insert(2, str(objects[1]))

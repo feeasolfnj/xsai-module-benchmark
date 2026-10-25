@@ -2,6 +2,8 @@
 
 **跨架构使用先看 [K3 / 官方 SRK x86-64、ARM64 说明](MULTIARCH.md)**。
 
+默认自动尝试采集模块硬件周期数；没有 PMU 或权限时保留耗时结果并明确标为不可用。见[硬件周期说明](CYCLES.md)。
+
 **完整参数说明见 [新版完整使用说明](USAGE.md)**：环境检查、非连续CPU集、输入库、UL/DL扫参、预热剔除和DFT校验模式。
 
 在 **K3 RISC-V、x86-64、ARM64 Linux** 上，用直接生成的随机输入测试使用者自己的 XSAI 或官方 SRK/OAI PHY 模块。不是 RFsim，不包含完整 XSAI 工程、预编译库、神经网络权重或测试机器的私人日志。
@@ -78,16 +80,18 @@ python3 bench.py run neural --threads 8 --cpus 0-7 \
 
 A100应按本地设备实际核编号使用 `--cpus 8` 或 `--cpus 8-15`。某些后端需要硬件专用launcher，可加 `--launcher /your/path/run_on_a100`。当前K3的A100频率表最高1.8GHz，不能假定支持2.2GHz。核编号不是跨设备通用标准，需先查CPU拓扑及允许CPU范围。
 
-### 硬件周期（可选）
+### 硬件周期（自动检测）
 
-默认仅测时间，不依赖PMU权限。要启用真实硬件周期，请以 `--pmu` 重新构建，再用有perf权限的账号运行：
+默认构建所有模块的周期入口，运行时自动尝试硬件 PMU；无硬件或权限时仍完成耗时测试，周期结果为 null。无需安装 perf 命令行工具。
 
 ```bash
-python3 bench.py build --xsai /your/path/to/XSAI --pmu
-sudo -n python3 bench.py run llr --threads 1 --cpus 7
+python3 bench.py build --xsai /your/path/to/XSAI
+python3 bench.py run llr --threads 1
+python3 bench.py run llr --threads 1 --cycles off
+python3 bench.py run llr --threads 1 --cycles required
 ```
 
-DFT/IDFT目前不提供PMU统计，即使启用了此构建选项。PMU计入窗口内用户态计算、同步自旋及访存停顿，排除内核/虚拟机执行及被调度离CPU的时间；不能消除缓存等调度间接影响。线程累计周期不是墙钟周期。无法开PMU或发生复用时明确失败，不用频率乘时间代替。
+DFT/IDFT也有周期统计。`auto` 不可用时继续测时间；`required` 必须取得有效计数，否则失败。结果写入 `cycles.json` 和汇总的 `hardware_cycles` 字段。PMU计入用户态计算、同步及访存停顿，线程累计周期不是墙钟周期；不以时间乘主频代替。计数范围、开销、虚拟机限制和模式兼容性见 [CYCLES.md](CYCLES.md)。
 
 ## 随机输入与验证
 

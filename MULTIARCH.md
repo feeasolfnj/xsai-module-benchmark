@@ -106,6 +106,7 @@ python3 bench.py run neural --threads 1 --neural-backend tensorrt \
 ## 输入和结果的解释
 
 随机范围、计时边界、预热剔除、验证范围沿用 [USAGE.md](USAGE.md) 和 [README.md](README.md)。
+所有架构默认尝试采集硬件 CPU 周期；未暴露 PMU 或权限不足时周期为 null，耗时继续测试。可使用 `--cycles off/required`，详见 [CYCLES.md](CYCLES.md)。
 随机 UL LLR 不满足编码约束，译码可能全部失败；这是工作量/耗时测试，不是 BLER/BER 性能评估。
 DFT 的原生后端是调用本地库再检查重复一致性，不是独立数学参考正确性证明。
 1Rx 信道估计、测量和 LLR 仍为串行测试；八线程配置不保证八核同时计算。

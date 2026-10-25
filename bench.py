@@ -3,6 +3,7 @@
 import argparse,csv,datetime,math,hashlib,json,os,pathlib,re,shlex,shutil,subprocess,sys,uuid,statistics
 from platform_build import source_root, compiler, host_arch, check_library_arch, build_official, cache_value
 from bench_support import BenchError, select_cpus, benchmark_lock, fixed_frequency, frequency_snapshot, check_frequency, records, write_csv, summary
+from cycle_support import cycle_result
 P=pathlib.Path;ROOT=P(__file__).resolve().parent
 NAMES={'estimation':'test_pusch_estimation','measurement':'test_pusch_measurement','symbol':'test_pusch_symbol','llr':'test_llr_region','UL':'nr_ulschsim','DL':'nr_dlschsim','neural':'test_neural','dft':'bench-coop','idft':'bench-coop'}
 PAIRS={'estimation':(0,1),'measurement':(2,3),'symbol':(4,5),'neural':(6,7),'llr':(8,9),'UL':(10,11),'DL':(12,13),'dft':(14,16)}
@@ -52,8 +53,7 @@ def build(a):
  for key in keys:ready.pop(key,None)
  save(ready_file,ready)
  previous=json.loads((ROOT/'config.local.json').read_text()) if (ROOT/'config.local.json').exists() else {}
- c=dict(xsai=str(xsai),build=str(b),src=str(ROOT/'src'),out=str(out),cc=a.cc,architecture=arch,profile=profile,dft_backend='rvv-cooperative' if profile=='xsai' else 'local-native-serial',pmu=a.pmu,metric_pmu=previous.get('metric_pmu',{}) if previous.get('xsai')==str(xsai) else {})
- if not a.pmu:(out/'pmu_disabled.h').write_text('static inline void pmu_begin(void){}\nstatic inline void pmu_end(unsigned long n){(void)n;}\n')
+ c=dict(xsai=str(xsai),build=str(b),src=str(ROOT/'src'),out=str(out),cc=a.cc,architecture=arch,profile=profile,dft_backend='rvv-cooperative' if profile=='xsai' else 'local-native-serial',pmu=True,cycles_default='required' if a.pmu else 'auto',metric_pmu=previous.get('metric_pmu',{}) if previous.get('xsai')==str(xsai) else {})
  recipes=json.loads((ROOT/'templates/commands.json').read_text());log=[]
  def execute(cmd):
   log.append(cmd);q=shell(cmd,b);save(out/'build-commands.json',log)
@@ -69,7 +69,6 @@ def build(a):
      dep=out/name;execute([a.cc,*flags(b/'CMakeFiles/PHY_NR.dir/flags.make'),'-I'+str(sources[0].parent),'-c',str(sources[0]),'-o',str(dep)]);matches=[dep]
     arg=str(matches[0])
    for key in ['xsai','build','src','out']:arg=arg.replace('{'+key+'}',c[key])
-   if arg.endswith('/pmu_cycles.h') and not a.pmu:arg=str(out/'pmu_disabled.h')
    if arg.endswith('/libMAC_UE_NR.a') and not P(arg).exists():
     if not (b/'CMakeFiles/MAC_UE_NR.dir/link.txt').exists():raise BenchError('Missing MAC archive; run '+shlex.join(['cmake','--build',str(b),'--target','MAC_UE_NR','-j','8']))
     archive=out/'libMAC_UE_NR.a';manifest=out/'mac-cache.json'
@@ -95,9 +94,10 @@ def build(a):
   result[0]=a.cc if '-c' in result else ('c++' if '++' in result[0] else result[0])
   return result
  if profile=='official':
-  build_official(ROOT,xsai,b,out,a.cc,keys,execute,a.pmu)
+  build_official(ROOT,xsai,b,out,a.cc,keys,execute,True)
   for key in keys:
-   c['metric_pmu'][key]=a.pmu if key!='dft' else False
+   c['metric_pmu'][key]=True
+   if key=='dft':c['metric_pmu']['idft']=True
    ready[key]=source_signature(key)
   save(ready_file,ready);save(ROOT/'config.local.json',c)
   save(out/'provenance.json',dict(config=c,libdfts_sha256=sha(b/'libdfts.so'),sources={p.name:sha(p) for p in (ROOT/'src').iterdir() if p.is_file()}))
@@ -106,12 +106,13 @@ def build(a):
  for key in dict.fromkeys(keys):
   if key=='dft':
    cc=expand(recipes[14]);i=cc.index('-o');cc[i+1]=str(out/'parallel_fft.o');cc=[str(ROOT/'src/parallel_fft.c') if x==str(ROOT/'src/adapter.c') else x for x in cc];execute(cc)
-   execute(expand(recipes[15]))
-  first,last=PAIRS[key];execute(expand(recipes[first]));link=expand(recipes[last])
+   execute([*expand(recipes[15]),'-include',str(ROOT/'src/pmu_cycles.h')])
+  first,last=PAIRS[key];compile_cmd=expand(recipes[first])
+  execute(compile_cmd);link=expand(recipes[last])
   if key=='dft':link+=['-Wl,--no-as-needed','-lm','-Wl,--as-needed']
   execute(link)
-  c['metric_pmu'][key]=a.pmu if key!='dft' else False
-  if key=='dft':c['metric_pmu']['idft']=False
+  c['metric_pmu'][key]=True
+  if key=='dft':c['metric_pmu']['idft']=True
   ready[key]=source_signature(key);save(ready_file,ready);save(ROOT/'config.local.json',c)
   if key=='DL':print('DL uses your local libldpc.so; no private adaptive library is bundled.')
  save(ROOT/'config.local.json',c);save(out/'provenance.json',dict(config=c,libdfts_sha256=sha(b/'libdfts.so'),sources={p.name:sha(p) for p in (ROOT/'src').iterdir() if p.is_file()}))
@@ -139,7 +140,7 @@ def doctor(a):
 
 def source_signature(key):
  sources={'estimation':['standalone.c'],'measurement':['standalone.c'],'symbol':['standalone.c'],'llr':['random_llr.c'],'neural':['random_neural.c'],'UL':['nr_ulschsim.c'],'DL':['nr_dlschsim.c'],'dft':['bench.c','adapter.c','parallel_fft.c']}
- files=[ROOT/'src'/name for name in sources[key]]+list((ROOT/'src').glob('*.h'))+[ROOT/'platform_build.py',ROOT/'bench.py',ROOT/'templates/commands.json']
+ files=[ROOT/'src'/name for name in sources[key]]+list((ROOT/'src').glob('*.h'))+[ROOT/'platform_build.py',ROOT/'bench.py',ROOT/'cycle_support.py',ROOT/'templates/commands.json']
  return {p.name:sha(p) for p in files}
 
 def run(a):
@@ -161,6 +162,9 @@ def run(a):
  ready_file=ROOT/'build/ready.json';ready=json.loads(ready_file.read_text()) if ready_file.exists() else {}
  if ready.get('_profile')!=c.get('profile') or not binary.exists() or any(ready.get(key,{}).get(name)!=digest for name,digest in source_signature(key).items()):raise BenchError('Missing/stale/failed binary; rebuild --only '+key)
  notes=[]
+ cycle_mode=a.cycles or c.get('cycles_default','auto')
+ cycle_capable=c.get('metric_pmu',{}).get(a.metric,False)
+ if cycle_mode=='required' and not cycle_capable:raise BenchError('Hardware cycle instrumentation is missing; rebuild this metric')
  serial=a.metric in ('estimation','measurement','llr') or (a.metric in ('dft','idft') and c.get('dft_backend')=='local-native-serial')
  if serial and a.threads>1:notes.append('This module/backend is serial; eight requested threads do not create eight-way parallelism.')
  if len(allowed)<a.threads and not serial:notes.append('Oversubscribed workers may reduce performance.')
@@ -170,6 +174,7 @@ def run(a):
  warmup=a.warmup if a.warmup is not None else (10 if a.metric in ('UL','DL') else (10000 if a.metric in ('dft','idft') else (1000 if a.metric=='llr' else 20)))
  if warmup<0:raise BenchError('--warmup must be >= 0')
  env=os.environ.copy();env.update(LD_LIBRARY_PATH=str(b)+(':'+env['LD_LIBRARY_PATH'] if env.get('LD_LIBRARY_PATH') else ''),RANDOM_SEED=str(a.seed),OAI_RNGSEED=str(a.seed),BENCH_CPU_LIST=cpus,RANDOM_CPU_START=str(min(allowed)),RANDOM_CPU_COUNT=str(len(allowed)),BENCH_INPUT_BANK=str(a.input_bank),BENCH_WARMUP=str(warmup))
+ env['BENCH_CYCLES']=cycle_mode
  if a.metric in ('estimation','measurement','symbol'):args=[str(a.seed),str(n),str(a.seconds or 1.5)]
  elif a.metric=='llr':args=[str(a.seed),str(a.seconds or 1.5)]
  elif a.metric in ('UL','DL'):
@@ -194,6 +199,7 @@ def run(a):
  with benchmark_lock(wait=a.wait_lock),fixed_frequency(allowed,a.freq) as before:
   out=P(a.out).resolve() if a.out else ROOT/'results'/(datetime.datetime.now().strftime('%Y%m%d-%H%M%S')+'-'+a.metric+'-'+uuid.uuid4().hex[:6]);out.mkdir(parents=True,exist_ok=False)
   meta=dict(status='running',metric=a.metric,threads_requested=a.threads,workers_configured=n,cpus=cpus,seed=a.seed,config=c,argv=cmd,env=changes,notes=notes,frequency_before=before,pmu=c.get('metric_pmu',{}).get(a.metric,False),kernel=subprocess.check_output(['uname','-a'],text=True).strip(),libdfts_sha256=sha(b/'libdfts.so'),warmup_calls=warmup,input_bank=a.input_bank,cache_protocol='fixed-input warm-cache steady state' if a.input_bank==1 else 'cycling pregenerated bank; not guaranteed cold-cache')
+  meta.update(cycles_mode=cycle_mode)
   if a.metric=='neural':
    meta.update(plugin_sha256=sha(a.library),model_sha256=sha(weights),neural_backend=a.neural_backend)
    meta['engine_sha256' if a.neural_backend=='tensorrt' else 'weights_sha256']=sha(weights)
@@ -208,17 +214,21 @@ def run(a):
     for line in p.stdout:print(line,end='',flush=True);f.write(line)
     rc=p.wait()
    meta['returncode']=rc
+   cycles=cycle_result((out/'run.log').read_text(),cycle_mode,cycle_capable)
+   cycles['unit']='transport_block' if a.metric in ('UL','DL') else 'transform2048' if a.metric in ('dft','idft') else 'module_call'
+   meta['hardware_cycles']=cycles;save(out/'cycles.json',cycles)
    if rc:raise BenchError(f'Benchmark failed ({rc}), see {out}/run.log')
+   if cycle_mode=='required' and cycles['status']!='available':raise BenchError('Hardware cycles required but unavailable or invalid; see cycles.json')
    if a.metric=='neural':check_neural_log((out/'run.log').read_text(),a.neural_backend)
    if a.freq:check_frequency(allowed,a.freq)
    raw,parsed=records((out/'run.log').read_text(),warmup)
-   if not parsed:raise BenchError('Missing result records')
+   if not any(row['record_type'] in ('RESULT','CODING_UL','CODING_DL') for row in parsed):raise BenchError('Missing result records')
    for row in raw:
     if row['record_type']=='RESULT' and 'verification_scope' not in row:row['verification_scope']='serial_same_implementation' if a.metric in ('estimation','measurement','symbol') else 'repeatability_same_implementation'
     elif row['record_type']=='CODING_UL':row['verification_scope']='random_llr_not_decode_correctness'
     elif row['record_type']=='CODING_DL':row['verification_scope']='repeatability_same_payload'
    save(out/'results.raw.json',raw);write_csv(out/'results.raw.csv',raw);save(out/'results.json',parsed);write_csv(out/'results.csv',parsed)
-   report=summary(parsed);save(out/'summary.json',report);print(json.dumps(report,indent=2));meta['status']='passed'
+   report=summary(parsed);report['hardware_cycles']=cycles;save(out/'summary.json',report);print(json.dumps(report,indent=2));meta['status']='passed'
   except BaseException as exc:meta['status']='failed';meta['error']=str(exc);raise
   finally:
    if p and p.poll() is None:p.terminate();p.wait(timeout=10)
@@ -251,8 +261,9 @@ def make_parser():
  ap=argparse.ArgumentParser(description=__doc__);sp=ap.add_subparsers(dest='command',required=True)
  for name in ('doctor','build'):
   b=sp.add_parser(name);b.add_argument('--xsai','--srk','--source',dest='xsai',required=True);b.add_argument('--build');b.add_argument('--cc');b.add_argument('--profile',choices=['auto','xsai','official'],default='auto')
-  if name=='build':b.add_argument('--only',default='all');b.add_argument('--pmu',action='store_true')
+  if name=='build':b.add_argument('--only',default='all');b.add_argument('--pmu',action='store_true',help='Require hardware cycles by default at run time (otherwise auto-detect)')
  r=sp.add_parser('run');r.add_argument('metric',choices=NAMES);r.add_argument('--threads',type=int,choices=[1,8],required=True);r.add_argument('--cpus');r.add_argument('--freq',type=int);r.add_argument('--seed',type=int,default=20261022);r.add_argument('--seconds',type=float);r.add_argument('--library');r.add_argument('--weights');r.add_argument('--engine');r.add_argument('--neural-backend',choices=['native','tensorrt'],default='native');r.add_argument('--launcher');r.add_argument('--out');r.add_argument('--print-command',action='store_true');r.add_argument('--wait-lock',action='store_true')
+ r.add_argument('--cycles',choices=['auto','off','required'],help='Auto-detect hardware CPU cycles (default); off avoids PMU collection; required fails if unavailable')
  for opt in ('warmup','rb','carrier-rb','mcs','symbols','trials'):r.add_argument('--'+opt,type=int)
  r.add_argument('--snr',type=float);r.add_argument('--input-bank',type=int,default=1);r.add_argument('--iterations',type=int,default=10000);r.add_argument('--batches',type=int,default=7)
  r.add_argument('--verify',choices=['strict','report','skip'],default='strict');r.add_argument('--skip-verify',dest='verify',action='store_const',const='skip')

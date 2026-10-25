@@ -7,6 +7,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifndef BENCH_PMU_CYCLES_H
+/* Standalone protocol tests may compile without the injected PMU header. */
+static inline void pmu_begin(void){}
+static inline void pmu_end(unsigned n){(void)n;}
+#endif
 extern int latency_verification_status(void);
 static double tm(clockid_t id){struct timespec t;clock_gettime(id,&t);return t.tv_sec+t.tv_nsec*1e-9;}
 static int cmp(const void*a,const void*b){double x=*(double*)a,y=*(double*)b;return (x>y)-(x<y);}
@@ -30,7 +35,7 @@ int main(int argc,char**argv){
  for(int i=0;i<warmup;i++)selected_module.run(x+4096*(i%bank),y,1);
  double *samples=calloc(batches,sizeof(double));assert(samples);
  double c=tm(CLOCK_PROCESS_CPUTIME_ID),w=tm(CLOCK_MONOTONIC_RAW);
- for(int r=0;r<batches;r++){double t=tm(CLOCK_MONOTONIC_RAW);for(int j=0;j<iterations;j++)selected_module.run(x+4096*(j%bank),y,1);samples[r]=(tm(CLOCK_MONOTONIC_RAW)-t)*1e6/iterations;}
+ for(int r=0;r<batches;r++){pmu_begin();double t=tm(CLOCK_MONOTONIC_RAW);for(int j=0;j<iterations;j++)selected_module.run(x+4096*(j%bank),y,1);samples[r]=(tm(CLOCK_MONOTONIC_RAW)-t)*1e6/iterations;pmu_end(iterations);}
  double wall=tm(CLOCK_MONOTONIC_RAW)-w,cpu=tm(CLOCK_PROCESS_CPUTIME_ID)-c;
  qsort(samples,batches,sizeof(double),cmp);
  double median=batches%2?samples[batches/2]:(samples[batches/2-1]+samples[batches/2])/2;
