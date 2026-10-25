@@ -1,5 +1,5 @@
 name: Official SRK CPU modules
-on: [push, pull_request, workflow_dispatch]
+on: [pull_request, workflow_dispatch]
 jobs:
   official:
     strategy:
@@ -32,7 +32,7 @@ jobs:
       - name: Build local OAI dependencies
         run: |
           cmake -S "$RUNNER_TEMP/oai" -B "$RUNNER_TEMP/oai/build" -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DASN1C_EXEC="$RUNNER_TEMP/asn1c-install/bin/asn1c" -DENABLE_PLUGINS=OFF -DENABLE_CUDA=OFF -DENABLE_TESTS=OFF
-          cmake --build "$RUNNER_TEMP/oai/build" --target nr_ulsim nr_dlsim dfts ldpc nrLDPC_coding --parallel 2
+          cmake --build "$RUNNER_TEMP/oai/build" --target nr_ulsim nr_dlsim dfts ldpc --parallel 2
       - name: Build benchmarks against official local libraries
         run: python3 bench.py build --srk "$RUNNER_TEMP/oai" --build "$RUNNER_TEMP/oai/build" --profile official
       - name: Execute each CPU module, one and eight requested threads

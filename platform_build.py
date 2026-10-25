@@ -1,5 +1,6 @@
 """Read the local OAI build configuration; never guess foreign ISA flags."""
 import json
+import hashlib
 import pathlib
 import platform
 import shlex
@@ -158,11 +159,24 @@ def build_official(root, xsai, build, out, cc, keys, execute, pmu=False):
             recipe = build / f'CMakeFiles/{target}.dir/link.txt'
             if not recipe.is_file():
                 raise BenchError(f'Missing {path}; run cmake --build {build} --target {target}')
-            objects = [artifact(x) for x in shlex.split(recipe.read_text().splitlines()[0]) if x.endswith('.o')]
-            if not objects:
+            inputs = [x for x in shlex.split(recipe.read_text().splitlines()[0]) if x.endswith('.o')]
+            if not inputs:
                 raise BenchError(f'Cannot reconstruct {target}; complete the OAI build first')
             archive = out / path.name
-            execute(['ar', 'rcs', str(archive), *objects])
+            manifest = out / (path.name + '.inputs.json')
+            fingerprint = {'compiler': cc, 'flags': compile_flags(build, target), 'inputs': {}}
+            for item in inputs:
+                candidate = build / item
+                if not candidate.is_file():
+                    candidate = xsai / item.split('.dir/', 1)[1][:-2]
+                fingerprint['inputs'][str(candidate)] = hashlib.sha256(candidate.read_bytes()).hexdigest()
+            if not archive.exists() or not manifest.exists() or json.loads(manifest.read_text()) != fingerprint:
+                objects = [artifact(x) for x in inputs]
+                # Recreate rather than append, so removed members cannot survive a rebuild.
+                if archive.exists():
+                    archive.unlink()
+                execute(['ar', 'rcs', str(archive), *objects])
+                manifest.write_text(json.dumps(fingerprint, indent=2))
             resolved[token] = str(archive)
         else:
             raise BenchError(f'Missing OAI build artifact: {path}')

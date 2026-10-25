@@ -1,5 +1,7 @@
 # 新版使用与结果口径
 
+跨架构配置、官方 SRK 和 TensorRT engine 用法见 [MULTIARCH.md](MULTIARCH.md)。
+
 ## 克隆后的操作
 
 ```bash
