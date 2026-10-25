@@ -119,7 +119,9 @@ def module_link(original, obj, output):
             skip = True
             continue
         # Drop only the simulator main, not helper objects from other targets.
-        if token.endswith('.o') and any(f'CMakeFiles/{name}.dir/' in token for name in ('nr_ulsim', 'nr_dlsim')):
+        mains = ('ulsim.c.o', 'dlsim.c.o', 'nr_ulschsim.c.o', 'nr_dlschsim.c.o',
+                 'softmodem-common.c.o', 'rrc_nsa.c.o', 'nfapi.c.o', 'gnb_ind_vars.c.o', 'queue_t.c.o')
+        if P(token).name in mains and any(f'CMakeFiles/{name}.dir/' in token for name in ('nr_ulsim', 'nr_dlsim')):
             continue
         if token == '-rdynamic':
             continue
@@ -130,7 +132,9 @@ def module_link(original, obj, output):
     return result + ['-o', str(output), '-Wl,--gc-sections',
                      '-Wl,--export-dynamic-symbol=T_*', '-Wl,--export-dynamic-symbol=exit_function',
                      '-Wl,--export-dynamic-symbol=g_log', '-Wl,--export-dynamic-symbol=logRecord_mt',
-                     '-Wl,--export-dynamic-symbol=write_file_matlab', '-ldl', '-lm']
+                     '-Wl,--export-dynamic-symbol=cpu_meas_enabled',
+                     '-Wl,--export-dynamic-symbol=write_file_matlab', '-ldl',
+                     '-Wl,--no-as-needed', '-lm', '-Wl,--as-needed']
 
 
 def build_official(root, xsai, build, out, cc, keys, execute, pmu=False):
@@ -190,6 +194,8 @@ def build_official(root, xsai, build, out, cc, keys, execute, pmu=False):
         # The UL benchmark's unitary helpers call the queue API directly.
         if output.name == 'nr_ulschsim':
             command.insert(2, artifact('CMakeFiles/nr_ulsim.dir/openair2/PHY_INTERFACE/queue_t.c.o'))
+        if output.name in ('nr_ulschsim', 'nr_dlschsim'):
+            command.append('-rdynamic')
         command.insert(1, '-Wl,--start-group')
         command.append('-Wl,--end-group')
         return [artifact(x) for x in command]
@@ -198,7 +204,7 @@ def build_official(root, xsai, build, out, cc, keys, execute, pmu=False):
     for key in keys:
         target = 'nr_dlsim' if key == 'DL' else 'nr_ulsim'
         flag_target = target if key in ('UL', 'DL') else 'PHY_NR'
-        flags = ['-I' + str(root / 'src'), *compile_flags(build, flag_target)]
+        flags = ['-D_GNU_SOURCE', '-I' + str(root / 'src'), *compile_flags(build, flag_target)]
         flags += ['-I' + str(root / 'src'), '-I' + str(xsai / 'openair1/PHY/NR_TRANSPORT'),
                   '-ffunction-sections', '-fdata-sections', '-UNDEBUG', '-DTB_KIND=' + str({'measurement': 1, 'symbol': 2}.get(key, 0))]
         header = root / 'src/pmu_cycles.h' if pmu else out / 'pmu_disabled.h'

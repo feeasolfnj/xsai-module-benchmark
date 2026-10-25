@@ -8,6 +8,9 @@ NAMES={'estimation':'test_pusch_estimation','measurement':'test_pusch_measuremen
 PAIRS={'estimation':(0,1),'measurement':(2,3),'symbol':(4,5),'neural':(6,7),'llr':(8,9),'UL':(10,11),'DL':(12,13),'dft':(14,16)}
 def save(p,x):p.write_text(json.dumps(x,ensure_ascii=False,indent=2))
 def sha(p):return hashlib.sha256(P(p).read_bytes()).hexdigest()
+def check_neural_log(log,backend):
+ if backend=='tensorrt' and re.search(r'failed to deserialize engine|no engine available|execution context unavailable|Error Code:\s*[1-9]|CUDA error',log,re.I):
+  raise BenchError('TensorRT reported an engine/context/inference failure; this timing is invalid. Check run.log and rebuild the engine for this GPU/TensorRT version.')
 def shell(cmd,cwd):
  q=subprocess.run(cmd,cwd=cwd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
  print(q.stdout,end='');return q
@@ -189,6 +192,7 @@ def run(a):
   meta=dict(status='running',metric=a.metric,threads_requested=a.threads,workers_configured=n,cpus=cpus,seed=a.seed,config=c,argv=cmd,env=changes,notes=notes,frequency_before=before,pmu=c.get('metric_pmu',{}).get(a.metric,False),kernel=subprocess.check_output(['uname','-a'],text=True).strip(),libdfts_sha256=sha(b/'libdfts.so'),warmup_calls=warmup,input_bank=a.input_bank,cache_protocol='fixed-input warm-cache steady state' if a.input_bank==1 else 'cycling pregenerated bank; not guaranteed cold-cache')
   if a.metric=='neural':
    meta.update(plugin_sha256=sha(a.library),model_sha256=sha(weights),neural_backend=a.neural_backend)
+   meta['engine_sha256' if a.neural_backend=='tensorrt' else 'weights_sha256']=sha(weights)
    if a.neural_backend=='tensorrt':
     cfg=out/'plugins/neural_receiver/config';cfg.mkdir(parents=True)
     (cfg/'receiver_trt.config').write_text(weights+'\n')
@@ -201,6 +205,7 @@ def run(a):
     rc=p.wait()
    meta['returncode']=rc
    if rc:raise BenchError(f'Benchmark failed ({rc}), see {out}/run.log')
+   if a.metric=='neural':check_neural_log((out/'run.log').read_text(),a.neural_backend)
    if a.freq:check_frequency(allowed,a.freq)
    raw,parsed=records((out/'run.log').read_text(),warmup)
    if not parsed:raise BenchError('Missing result records')

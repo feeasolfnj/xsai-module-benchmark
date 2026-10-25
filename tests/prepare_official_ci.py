@@ -34,4 +34,6 @@ const void *channel_emulator_cir_read_and_apply(void){return 0;}
 ''')
 with (oai / 'CMakeLists.txt').open('a') as f:
     f.write('\n# CPU-only benchmark CI fixture (no GPU plugin initialization)\n')
-    f.write('target_sources(PHY_NR PRIVATE ${CMAKE_SOURCE_DIR}/benchmark_cpu_plugins.c)\n')
+    # Simulator targets already inherit generated ASN.1 include paths/dependencies.
+    f.write('target_sources(nr_ulsim PRIVATE ${CMAKE_SOURCE_DIR}/benchmark_cpu_plugins.c)\n')
+    f.write('target_sources(nr_dlsim PRIVATE ${CMAKE_SOURCE_DIR}/benchmark_cpu_plugins.c)\n')

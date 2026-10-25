@@ -1,5 +1,8 @@
 name: Official SRK CPU modules
 on: [pull_request, workflow_dispatch]
+concurrency:
+  group: official-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   official:
     strategy:
@@ -8,13 +11,22 @@ jobs:
         os: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    env:
+      CCACHE_DIR: ${{ runner.temp }}/ccache
+      CCACHE_MAXSIZE: 2G
     steps:
       - uses: actions/checkout@v4
       - name: System dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y build-essential cmake ninja-build autoconf automake libtool bison flex libconfig-dev libsctp-dev libssl-dev zlib1g-dev libblas-dev liblapacke-dev libyaml-cpp-dev libsimde-dev libforms-dev libxft-dev libusb-1.0-0-dev libgnutls28-dev libboost-all-dev python3-numpy python3-mako
+          sudo apt-get install -y build-essential ccache cmake ninja-build autoconf automake libtool bison flex libconfig-dev libsctp-dev libssl-dev zlib1g-dev libblas-dev liblapacke-dev libyaml-cpp-dev libsimde-dev libforms-dev libxft-dev libusb-1.0-0-dev libgnutls28-dev libboost-all-dev python3-numpy python3-mako
+      - uses: actions/cache/restore@v4
+        id: asn-cache
+        with:
+          path: ${{ runner.temp }}/asn1c-install
+          key: asn1c-ubuntu24-${{ runner.arch }}-940dd5fa
       - name: Build the OAI ASN.1 compiler
+        if: steps.asn-cache.outputs.cache-hit != 'true'
         run: |
           git clone https://github.com/mouse07410/asn1c "$RUNNER_TEMP/asn1c"
           cd "$RUNNER_TEMP/asn1c"
@@ -23,6 +35,19 @@ jobs:
           ./configure --prefix="$RUNNER_TEMP/asn1c-install"
           make -j2
           make install
+      - uses: actions/cache/save@v4
+        if: steps.asn-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/asn1c-install
+          key: asn1c-ubuntu24-${{ runner.arch }}-940dd5fa
+      - name: Identify native compiler target for cache isolation
+        id: native
+        run: echo "cpu_key=$(cc -march=native -Q --help=target | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: official-${{ runner.arch }}-${{ steps.native.outputs.cpu_key }}-${{ github.run_id }}
+          restore-keys: official-${{ runner.arch }}-${{ steps.native.outputs.cpu_key }}-
       - name: Prepare pinned official sources
         run: |
           git clone https://github.com/NVlabs/sionna-rk.git "$RUNNER_TEMP/srk"
@@ -33,6 +58,11 @@ jobs:
         run: |
           cmake -S "$RUNNER_TEMP/oai" -B "$RUNNER_TEMP/oai/build" -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DASN1C_EXEC="$RUNNER_TEMP/asn1c-install/bin/asn1c" -DENABLE_PLUGINS=OFF -DENABLE_CUDA=OFF -DENABLE_TESTS=OFF
           cmake --build "$RUNNER_TEMP/oai/build" --target nr_ulsim nr_dlsim dfts ldpc --parallel 2
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: official-${{ runner.arch }}-${{ steps.native.outputs.cpu_key }}-${{ github.run_id }}
       - name: Build benchmarks against official local libraries
         run: python3 bench.py build --srk "$RUNNER_TEMP/oai" --build "$RUNNER_TEMP/oai/build" --profile official
       - name: Execute each CPU module, one and eight requested threads

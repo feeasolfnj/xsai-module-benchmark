@@ -11,6 +11,15 @@ from bench_support import BenchError
 
 
 class PlatformBuildTests(unittest.TestCase):
+    def test_tensorrt_skipped_inference_is_not_a_passing_benchmark(self):
+        from bench import check_neural_log
+        for message in ('TensorRT: failed to deserialize engine',
+                        'TensorRT: execution context unavailable; skipping receiver decode',
+                        'TensorRT: no engine available; cannot create execution context'):
+            with self.subTest(message=message), self.assertRaises(BenchError):
+                check_neural_log(message + '\n[RESULT] verification=passed', 'tensorrt')
+        check_neural_log('Initialized TRT receiver\n[RESULT] verification=passed', 'tensorrt')
+
     def test_architecture_aliases(self):
         self.assertEqual(host_arch('AMD64'), 'x86_64')
         self.assertEqual(host_arch('arm64'), 'aarch64')
