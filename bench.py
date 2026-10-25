@@ -43,8 +43,9 @@ def build(a):
  keys=list(PAIRS) if a.only=='all' else list(dict.fromkeys('dft' if x=='idft' else x for x in a.only.split(',')))
  if set(keys)-set(PAIRS):raise BenchError('Unknown build metric')
  ready_file=out/'ready.json';ready=json.loads(ready_file.read_text()) if ready_file.exists() else {}
- if ready.get('_xsai')!=str(xsai) or ready.get('_build')!=str(b):ready={}
- ready.update(_xsai=str(xsai),_build=str(b))
+ identity=dict(_xsai=str(xsai),_build=str(b),_profile=profile,_cc=a.cc,_pmu=a.pmu,_libdfts=sha(b/'libdfts.so'))
+ if any(ready.get(k)!=v for k,v in identity.items()):ready={}
+ ready.update(identity)
  for key in keys:ready.pop(key,None)
  save(ready_file,ready)
  previous=json.loads((ROOT/'config.local.json').read_text()) if (ROOT/'config.local.json').exists() else {}
@@ -94,7 +95,7 @@ def build(a):
   build_official(ROOT,xsai,b,out,a.cc,keys,execute,a.pmu)
   for key in keys:
    c['metric_pmu'][key]=a.pmu if key!='dft' else False
-   ready[key]={p.name:sha(p) for p in (ROOT/'src').iterdir() if p.is_file()}
+   ready[key]=source_signature(key)
   save(ready_file,ready);save(ROOT/'config.local.json',c)
   save(out/'provenance.json',dict(config=c,libdfts_sha256=sha(b/'libdfts.so'),sources={p.name:sha(p) for p in (ROOT/'src').iterdir() if p.is_file()}))
   return
@@ -108,7 +109,7 @@ def build(a):
   execute(link)
   c['metric_pmu'][key]=a.pmu if key!='dft' else False
   if key=='dft':c['metric_pmu']['idft']=False
-  ready[key]={p.name:sha(p) for p in (ROOT/'src').iterdir() if p.is_file()};save(ready_file,ready);save(ROOT/'config.local.json',c)
+  ready[key]=source_signature(key);save(ready_file,ready);save(ROOT/'config.local.json',c)
   if key=='DL':print('DL uses your local libldpc.so; no private adaptive library is bundled.')
  save(ROOT/'config.local.json',c);save(out/'provenance.json',dict(config=c,libdfts_sha256=sha(b/'libdfts.so'),sources={p.name:sha(p) for p in (ROOT/'src').iterdir() if p.is_file()}))
 
@@ -131,7 +132,7 @@ def doctor(a):
 
 def source_signature(key):
  sources={'estimation':['standalone.c'],'measurement':['standalone.c'],'symbol':['standalone.c'],'llr':['random_llr.c'],'neural':['random_neural.c'],'UL':['nr_ulschsim.c'],'DL':['nr_dlschsim.c'],'dft':['bench.c','adapter.c','parallel_fft.c']}
- files=[ROOT/'src'/name for name in sources[key]]+list((ROOT/'src').glob('*.h'))
+ files=[ROOT/'src'/name for name in sources[key]]+list((ROOT/'src').glob('*.h'))+[ROOT/'platform_build.py',ROOT/'bench.py',ROOT/'templates/commands.json']
  return {p.name:sha(p) for p in files}
 
 def run(a):
@@ -146,10 +147,12 @@ def run(a):
  if (a.rb or 50)>(a.carrier_rb or 106):raise BenchError('--rb cannot exceed --carrier-rb')
  if not 0<=a.seed<=4294967295:raise BenchError('--seed must fit uint32')
  if a.snr is not None and not math.isfinite(a.snr):raise BenchError('--snr must be finite')
- c=config();b=P(c['build']);allowed=select_cpus(a.cpus,a.threads);cpus=','.join(map(str,allowed))
+ c=config();b=P(c['build'])
+ if c.get('architecture',host_arch())!=host_arch():raise BenchError('Build architecture differs from this host; rebuild locally')
+ allowed=select_cpus(a.cpus,a.threads);cpus=','.join(map(str,allowed))
  binary=ROOT/'build'/NAMES[a.metric];key='dft' if a.metric=='idft' else a.metric
  ready_file=ROOT/'build/ready.json';ready=json.loads(ready_file.read_text()) if ready_file.exists() else {}
- if not binary.exists() or any(ready.get(key,{}).get(name)!=digest for name,digest in source_signature(key).items()):raise BenchError('Missing/stale/failed binary; rebuild --only '+key)
+ if ready.get('_profile')!=c.get('profile') or not binary.exists() or any(ready.get(key,{}).get(name)!=digest for name,digest in source_signature(key).items()):raise BenchError('Missing/stale/failed binary; rebuild --only '+key)
  notes=[]
  serial=a.metric in ('estimation','measurement','llr') or (a.metric in ('dft','idft') and c.get('dft_backend')=='local-native-serial')
  if serial and a.threads>1:notes.append('This module/backend is serial; eight requested threads do not create eight-way parallelism.')

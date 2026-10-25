@@ -118,11 +118,18 @@ def module_link(original, obj, output):
             skip = True
             continue
         # Drop only the simulator main, not helper objects from other targets.
-        if token.endswith(('/ulsim.c.o', '/dlsim.c.o', '/nr_ulschsim.c.o', '/nr_dlschsim.c.o')):
+        if token.endswith('.o') and any(f'CMakeFiles/{name}.dir/' in token for name in ('nr_ulsim', 'nr_dlsim')):
             continue
+        if token == '-rdynamic':
+            continue
+        if token == '-lgcc_s_asneeded':
+            token = '-lgcc_s'
         result.append(token)
     result[1:1] = [str(obj)]
-    return result + ['-o', str(output), '-Wl,--gc-sections', '-Wl,--export-dynamic', '-ldl', '-lm']
+    return result + ['-o', str(output), '-Wl,--gc-sections',
+                     '-Wl,--export-dynamic-symbol=T_*', '-Wl,--export-dynamic-symbol=exit_function',
+                     '-Wl,--export-dynamic-symbol=g_log', '-Wl,--export-dynamic-symbol=logRecord_mt',
+                     '-Wl,--export-dynamic-symbol=write_file_matlab', '-ldl', '-lm']
 
 
 def build_official(root, xsai, build, out, cc, keys, execute, pmu=False):
@@ -162,13 +169,22 @@ def build_official(root, xsai, build, out, cc, keys, execute, pmu=False):
         return resolved[token]
 
     def link(obj, output, target):
-        return [artifact(x) for x in module_link(link_command(build, target), obj, output)]
+        command = module_link(link_command(build, target), obj, output)
+        plugins = build / 'plugins/libplugins_plugins.a'
+        if plugins.exists() and not any('libplugins_plugins.a' in x for x in command):
+            command.insert(2, str(plugins))
+        # The UL benchmark's unitary helpers call the queue API directly.
+        if output.name == 'nr_ulschsim':
+            command.insert(2, artifact('CMakeFiles/nr_ulsim.dir/openair2/PHY_INTERFACE/queue_t.c.o'))
+        command.insert(1, '-Wl,--start-group')
+        command.append('-Wl,--end-group')
+        return [artifact(x) for x in command]
     (out / 'pmu_disabled.h').write_text('static inline void pmu_begin(void){}\nstatic inline void pmu_end(unsigned n){(void)n;}\n')
     has_measurement_timer = 'ulsch_channel_measurement_stats' in (xsai / 'openair1/PHY/defs_gNB.h').read_text()
     for key in keys:
         target = 'nr_dlsim' if key == 'DL' else 'nr_ulsim'
         flag_target = target if key in ('UL', 'DL') else 'PHY_NR'
-        flags = compile_flags(build, flag_target)
+        flags = ['-I' + str(root / 'src'), *compile_flags(build, flag_target)]
         flags += ['-I' + str(root / 'src'), '-I' + str(xsai / 'openair1/PHY/NR_TRANSPORT'),
                   '-ffunction-sections', '-fdata-sections', '-UNDEBUG', '-DTB_KIND=' + str({'measurement': 1, 'symbol': 2}.get(key, 0))]
         header = root / 'src/pmu_cycles.h' if pmu else out / 'pmu_disabled.h'

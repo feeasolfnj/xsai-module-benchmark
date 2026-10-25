@@ -16,7 +16,7 @@ clean = ''.join('diff --git ' + b for b in blocks if '\n--- ' in b and '\n+++ ' 
 patch_path = oai / 'srk-ci.patch'
 patch_path.write_text(clean)
 subprocess.run(['git', 'apply', '--whitespace=nowarn', str(patch_path.resolve())], cwd=oai, check=True)
-shutil.copytree(srk / 'plugins', oai / 'plugins')
+shutil.copytree(srk / 'plugins', oai / 'plugins', symlinks=True)
 fixture = oai / 'benchmark_cpu_plugins.c'
 fixture.write_text('''
 #include "plugins/common/src/plugins.h"
