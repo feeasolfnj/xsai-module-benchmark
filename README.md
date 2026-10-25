@@ -1,8 +1,10 @@
 # XSAI module benchmark
 
-**先看 [新版完整使用说明](USAGE.md)**：环境检查、非连续CPU集、输入库、UL/DL扫参、预热剔除和DFT校验模式。
+**跨架构使用先看 [K3 / 官方 SRK x86-64、ARM64 说明](MULTIARCH.md)**。
 
-在 **K3 Linux / RISC-V RVV** 上，用直接生成的随机输入测试使用者自己的 XSAI PHY 模块。不是 RFsim，不包含完整 XSAI 工程、预编译库、神经网络权重或测试机器的私人日志。
+**完整参数说明见 [新版完整使用说明](USAGE.md)**：环境检查、非连续CPU集、输入库、UL/DL扫参、预热剔除和DFT校验模式。
+
+在 **K3 RISC-V、x86-64、ARM64 Linux** 上，用直接生成的随机输入测试使用者自己的 XSAI 或官方 SRK/OAI PHY 模块。不是 RFsim，不包含完整 XSAI 工程、预编译库、神经网络权重或测试机器的私人日志。
 
 ## 测试项目
 
@@ -15,13 +17,13 @@
 | UL | nr_ulschsim | 50 RB、两个码块的整个TB译码 |
 | DL | nr_dlschsim | 50 RB、两个码块的整个编码调用 |
 | neural | test_neural | 24 RB，完整receiver_compute_llr插件回调 |
-| dft / idft | bench-coop | 单份2048点变换，原单线程或八线程协同候选 |
+| dft / idft | bench-coop | 单份2048点变换；K3 RVV 可八线程协同，官方配置使用本地串行原实现 |
 
 PUSCH估计、测量、符号处理是提取的原处理区域；不是上游正式发布的独立模块API。构建时链接本地XSAI库。源码/结构体不兼容时必须修改适配，不保证任意XSAI版本都能编译。
 
 ## 环境和本地工程
 
-- K3 Linux，RVV、VLEN=256bit，GCC16（可用 `--cc` 指定）；Python3、make/CMake、ar、C++链接器。
+- 64位 Linux；K3 RVV 配置要求 VLEN=256bit 和兼容编译器。x86-64 / ARM64 官方配置读取本地 CMake 参数，详见 [MULTIARCH.md](MULTIARCH.md)。需要 Python3.10+、make/CMake 或 Ninja、ar、C++链接器。
 - 提前编译自己的XSAI，保留源码、CMake构建目录、静态库、动态库与flags.make。建议先完成本地工程的 `nr_ulsim`、`nr_ulschsim`、`nr_dlschsim` 构建；具体配置跟随该工程文档。
 - 这不是只提供安装后的几个动态库就能编译的项目。
 - 已知开发环境XSAI Git基线：`18276ae0b271dea9b68420eecc58dd8b45e28787`，包含本地修改（例如RVV内核与统计字段）；commit相同也不能保证工作树相同。仓库运行时会校验并行候选相对本地原实现的一致性。
@@ -59,7 +61,7 @@ python3 bench.py run dft --threads 8 --seed 1
 python3 bench.py run idft --threads 1 --seed 1
 ```
 
-`--threads 8`是配置，不保证模块能够用满8核。LLR当前仍是单线程；1Rx信道估计/测量也可能只用1核。DFT/IDFT的8线程是共同处理**一份**变换，不是8进程吞吐测试；候选未自动接入生产链路。该候选使用共享工作数组，基准程序串行提交变换，不支持多个调用者同时重入。
+`--threads 8`是配置，不保证模块能够用满8核。LLR当前仍是单线程；1Rx信道估计/测量也可能只用1核。K3 RVV 配置中 DFT/IDFT的8线程是共同处理**一份**变换，不是8进程吞吐测试；候选未自动接入生产链路。该候选使用共享工作数组，基准程序串行提交变换，不支持多个调用者同时重入。
 
 DL使用你本地的LDPC编码库；开发记录中曾使用过的私有自适应编码库不在此仓库内，也不自动加载。不同后端的性能结果必须分别标识。
 

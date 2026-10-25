@@ -1666,5 +1666,8 @@ int main(int argc,char**argv){
  pmu_begin();double t0=tb_clock(CLOCK_MONOTONIC_RAW);tb_execute(c,TB_KIND);wall+=tb_clock(CLOCK_MONOTONIC_RAW)-t0;pmu_end(1);calls++;if((calls&255)==0)tb_check(c,ref);}while(tb_clock(CLOCK_MONOTONIC_RAW)-begin<seconds);
  double window_wall=tb_clock(CLOCK_MONOTONIC_RAW)-begin;cpu=tb_clock(CLOCK_PROCESS_CPUTIME_ID)-process_begin;
  tb_check(c,ref);AssertFatal(tb_digest(base->g->common_vars.rxdataF[0][0],c->rx_count*sizeof(c16_t))==tb_digest(c->g->common_vars.rxdataF[0][0],c->rx_count*sizeof(c16_t)),"input changed");
- printf("[RESULT] kind=%d workers=%d calls=%lu mean_us=%.9f wall_s=%.9f cpu_s=%.9f cores=%.9f verification=passed verification_scope=serial_same_implementation input_hash=%llu window_wall_s=%.9f compute_fraction=%.9f\n",TB_KIND,workers,calls,wall*1e6/calls,wall,cpu,cpu/window_wall,(unsigned long long)immutable,window_wall,wall/window_wall);abortTpool(&c->g->threadPool);return 0;
+ printf("[RESULT] kind=%d workers=%d calls=%lu mean_us=%.9f wall_s=%.9f cpu_s=%.9f cores=%.9f verification=passed verification_scope=serial_same_implementation input_hash=%llu window_wall_s=%.9f compute_fraction=%.9f\n",TB_KIND,workers,calls,wall*1e6/calls,wall,cpu,cpu/window_wall,(unsigned long long)immutable,window_wall,wall/window_wall);/* All jobs have completed and outputs were checked above. This process owns
+    the pool until exit. Avoid the upstream abort/join race under CPU overcommit;
+    process exit reclaims waiting workers outside the measured interval. */
+ fflush(stdout);return 0;
 }

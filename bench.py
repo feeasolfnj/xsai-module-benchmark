@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Independent, relocatable XSAI module benchmark launcher (Linux/RISC-V)."""
+"""Independent, relocatable XSAI module benchmark launcher (64-bit Linux: RISC-V, x86-64, ARM64)."""
 import argparse,csv,datetime,math,hashlib,json,os,pathlib,re,shlex,shutil,subprocess,sys,uuid,statistics
+from platform_build import source_root, compiler, host_arch, check_library_arch, build_official, cache_value
 from bench_support import BenchError, select_cpus, benchmark_lock, fixed_frequency, frequency_snapshot, check_frequency, records, write_csv, summary
 P=pathlib.Path;ROOT=P(__file__).resolve().parent
 NAMES={'estimation':'test_pusch_estimation','measurement':'test_pusch_measurement','symbol':'test_pusch_symbol','llr':'test_llr_region','UL':'nr_ulschsim','DL':'nr_dlschsim','neural':'test_neural','dft':'bench-coop','idft':'bench-coop'}
 PAIRS={'estimation':(0,1),'measurement':(2,3),'symbol':(4,5),'neural':(6,7),'llr':(8,9),'UL':(10,11),'DL':(12,13),'dft':(14,16)}
 def save(p,x):p.write_text(json.dumps(x,ensure_ascii=False,indent=2))
 def sha(p):return hashlib.sha256(P(p).read_bytes()).hexdigest()
+def check_neural_log(log,backend):
+ if backend=='tensorrt' and re.search(r'failed to deserialize engine|no engine available|execution context unavailable|Error Code\s*:?\s*[1-9]|CUDA error',log,re.I):
+  raise BenchError('TensorRT reported an engine/context/inference failure; this timing is invalid. Check run.log and rebuild the engine for this GPU/TensorRT version.')
 def shell(cmd,cwd):
  q=subprocess.run(cmd,cwd=cwd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
  print(q.stdout,end='');return q
@@ -34,18 +38,21 @@ def flags(path):
   if ' = ' in line:k,v=line.split(' = ',1);d[k]=shlex.split(v)
  return sum([d[k] for k in ['C_DEFINES','C_INCLUDES','C_FLAGS']],[])
 def build(a):
- xsai=P(a.xsai).resolve();b=P(a.build).resolve() if a.build else xsai/'cmake_targets/ran_build/build';out=ROOT/'build';out.mkdir(exist_ok=True)
+ xsai=source_root(a.xsai);b=P(a.build).resolve() if a.build else xsai/'cmake_targets/ran_build/build';out=ROOT/'build';out.mkdir(exist_ok=True)
  if not (b/'libdfts.so').exists():raise BenchError('Missing libdfts.so; run doctor --xsai '+str(xsai))
- if not shutil.which(a.cc):raise BenchError('Compiler not found: '+a.cc)
+ a.cc=compiler(b,a.cc);arch=host_arch();profile=a.profile if a.profile!='auto' else ('xsai' if arch=='riscv64' else 'official')
+ check_library_arch(b/'libdfts.so',arch)
+ if profile=='xsai' and arch!='riscv64':raise BenchError('The xsai profile requires a RISC-V host; use --profile official')
  keys=list(PAIRS) if a.only=='all' else list(dict.fromkeys('dft' if x=='idft' else x for x in a.only.split(',')))
  if set(keys)-set(PAIRS):raise BenchError('Unknown build metric')
  ready_file=out/'ready.json';ready=json.loads(ready_file.read_text()) if ready_file.exists() else {}
- if ready.get('_xsai')!=str(xsai) or ready.get('_build')!=str(b):ready={}
- ready.update(_xsai=str(xsai),_build=str(b))
+ identity=dict(_xsai=str(xsai),_build=str(b),_profile=profile,_cc=a.cc,_pmu=a.pmu,_libdfts=sha(b/'libdfts.so'))
+ if any(ready.get(k)!=v for k,v in identity.items()):ready={}
+ ready.update(identity)
  for key in keys:ready.pop(key,None)
  save(ready_file,ready)
  previous=json.loads((ROOT/'config.local.json').read_text()) if (ROOT/'config.local.json').exists() else {}
- c=dict(xsai=str(xsai),build=str(b),src=str(ROOT/'src'),out=str(out),cc=a.cc,pmu=a.pmu,metric_pmu=previous.get('metric_pmu',{}) if previous.get('xsai')==str(xsai) else {})
+ c=dict(xsai=str(xsai),build=str(b),src=str(ROOT/'src'),out=str(out),cc=a.cc,architecture=arch,profile=profile,dft_backend='rvv-cooperative' if profile=='xsai' else 'local-native-serial',pmu=a.pmu,metric_pmu=previous.get('metric_pmu',{}) if previous.get('xsai')==str(xsai) else {})
  if not a.pmu:(out/'pmu_disabled.h').write_text('static inline void pmu_begin(void){}\nstatic inline void pmu_end(unsigned long n){(void)n;}\n')
  recipes=json.loads((ROOT/'templates/commands.json').read_text());log=[]
  def execute(cmd):
@@ -87,6 +94,14 @@ def build(a):
   if '-c' in result:result.append('-UNDEBUG')
   result[0]=a.cc if '-c' in result else ('c++' if '++' in result[0] else result[0])
   return result
+ if profile=='official':
+  build_official(ROOT,xsai,b,out,a.cc,keys,execute,a.pmu)
+  for key in keys:
+   c['metric_pmu'][key]=a.pmu if key!='dft' else False
+   ready[key]=source_signature(key)
+  save(ready_file,ready);save(ROOT/'config.local.json',c)
+  save(out/'provenance.json',dict(config=c,libdfts_sha256=sha(b/'libdfts.so'),sources={p.name:sha(p) for p in (ROOT/'src').iterdir() if p.is_file()}))
+  return
  # validated above
  for key in dict.fromkeys(keys):
   if key=='dft':
@@ -97,33 +112,38 @@ def build(a):
   execute(link)
   c['metric_pmu'][key]=a.pmu if key!='dft' else False
   if key=='dft':c['metric_pmu']['idft']=False
-  ready[key]={p.name:sha(p) for p in (ROOT/'src').iterdir() if p.is_file()};save(ready_file,ready);save(ROOT/'config.local.json',c)
+  ready[key]=source_signature(key);save(ready_file,ready);save(ROOT/'config.local.json',c)
   if key=='DL':print('DL uses your local libldpc.so; no private adaptive library is bundled.')
  save(ROOT/'config.local.json',c);save(out/'provenance.json',dict(config=c,libdfts_sha256=sha(b/'libdfts.so'),sources={p.name:sha(p) for p in (ROOT/'src').iterdir() if p.is_file()}))
 
 def doctor(a):
- xsai=P(a.xsai).resolve();b=P(a.build).resolve() if a.build else xsai/'cmake_targets/ran_build/build';missing=[]
- print('Source:',xsai);print('Build:',b);print('Compiler:',shutil.which(a.cc))
+ xsai=source_root(a.xsai);b=P(a.build).resolve() if a.build else xsai/'cmake_targets/ran_build/build';missing=[]
+ a.cc=compiler(b,a.cc)
+ arch=host_arch();profile=a.profile if a.profile!='auto' else ('xsai' if arch=='riscv64' else 'official')
+ print('Architecture:',arch);print('Profile:',profile);print('Source:',xsai);print('Build:',b);print('Compiler:',shutil.which(a.cc))
+ if (b/'libdfts.so').is_file():check_library_arch(b/'libdfts.so',arch)
  if not shutil.which(a.cc):missing.append(a.cc)
  for name,target in {'libdfts.so':'dfts','libMAC_UE_NR.a':'MAC_UE_NR','libSCHED_NR_UE_LIB.a':'SCHED_NR_UE_LIB','libL2_NR.a':'L2_NR','libnr_ue_phy_meas.a':'nr_ue_phy_meas','libplugins_plugins.a':'plugins_plugins'}.items():
+  if profile=='official' and name=='libplugins_plugins.a' and cache_value(b,'ENABLE_PLUGINS') in ('OFF','0','FALSE'):
+   print('NOTE: local CMake explicitly disables plugins; no GPU plugin archive required for CPU modules');continue
   found=(b/name).is_file() or any(b.glob('**/'+name));print(('OK ' if found else 'MISSING ')+name)
   if not found and name=='libMAC_UE_NR.a' and (b/'CMakeFiles/MAC_UE_NR.dir/link.txt').exists():print('  will construct a private archive inside benchmark/build');continue
   if not found:missing.append(name);print('  repair:',shlex.join(['cmake','--build',str(b),'--target',target,'-j','8']))
  if not (b/'CMakeFiles/PHY_NR.dir/flags.make').exists():print('NOTE: no flags.make; missing helper rebuilds require compile_commands.json (CMAKE_EXPORT_COMPILE_COMMANDS=ON). Complete Ninja builds may already contain the helpers.')
  if hasattr(os,'sched_getaffinity'):print('Allowed CPUs:',sorted(os.sched_getaffinity(0)))
  print('ASN.1: apt asn1c 0.9.28 lacks -gen-APER; follow your XSAI setup. Build required NR targets if unrelated LTE/SSE targets fail.')
- print('Neural requires an external ABI-compatible plugin and weights; required CPU type depends on that plugin.')
+ print('Neural requires an external ABI-compatible plugin plus native weights or a TensorRT engine; hardware requirements depend on that plugin.')
  if missing:raise BenchError('Preflight incomplete: '+', '.join(missing))
  print('Preflight passed; actual source/API compatibility is checked by build.')
 
 
 def source_signature(key):
  sources={'estimation':['standalone.c'],'measurement':['standalone.c'],'symbol':['standalone.c'],'llr':['random_llr.c'],'neural':['random_neural.c'],'UL':['nr_ulschsim.c'],'DL':['nr_dlschsim.c'],'dft':['bench.c','adapter.c','parallel_fft.c']}
- files=[ROOT/'src'/name for name in sources[key]]+list((ROOT/'src').glob('*.h'))
+ files=[ROOT/'src'/name for name in sources[key]]+list((ROOT/'src').glob('*.h'))+[ROOT/'platform_build.py',ROOT/'bench.py',ROOT/'templates/commands.json']
  return {p.name:sha(p) for p in files}
 
 def run(a):
- if not hasattr(os,'sched_getaffinity'):raise BenchError('Running requires Linux/RISC-V')
+ if not hasattr(os,'sched_getaffinity'):raise BenchError('Running requires 64-bit Linux')
  if a.seconds is not None and (not math.isfinite(a.seconds) or a.seconds<=0 or a.metric in ('UL','DL','dft','idft')):raise BenchError('--seconds is only for PUSCH/LLR/neural; use --trials for UL/DL, --iterations for DFT')
  if a.input_bank<1 or a.input_bank>16:raise BenchError('--input-bank must be 1..16')
  if a.metric in ('UL','DL') and a.input_bank!=1:raise BenchError('Input banks are not supported for UL/DL')
@@ -134,13 +154,15 @@ def run(a):
  if (a.rb or 50)>(a.carrier_rb or 106):raise BenchError('--rb cannot exceed --carrier-rb')
  if not 0<=a.seed<=4294967295:raise BenchError('--seed must fit uint32')
  if a.snr is not None and not math.isfinite(a.snr):raise BenchError('--snr must be finite')
- c=config();b=P(c['build']);allowed=select_cpus(a.cpus,a.threads);cpus=','.join(map(str,allowed))
+ c=config();b=P(c['build'])
+ if c.get('architecture',host_arch())!=host_arch():raise BenchError('Build architecture differs from this host; rebuild locally')
+ allowed=select_cpus(a.cpus,a.threads);cpus=','.join(map(str,allowed))
  binary=ROOT/'build'/NAMES[a.metric];key='dft' if a.metric=='idft' else a.metric
  ready_file=ROOT/'build/ready.json';ready=json.loads(ready_file.read_text()) if ready_file.exists() else {}
- if not binary.exists() or any(ready.get(key,{}).get(name)!=digest for name,digest in source_signature(key).items()):raise BenchError('Missing/stale/failed binary; rebuild --only '+key)
+ if ready.get('_profile')!=c.get('profile') or not binary.exists() or any(ready.get(key,{}).get(name)!=digest for name,digest in source_signature(key).items()):raise BenchError('Missing/stale/failed binary; rebuild --only '+key)
  notes=[]
- serial=a.metric in ('estimation','measurement','llr')
- if serial and a.threads>1:notes.append('This 1Rx module is serial; eight requested threads do not create eight-way parallelism.')
+ serial=a.metric in ('estimation','measurement','llr') or (a.metric in ('dft','idft') and c.get('dft_backend')=='local-native-serial')
+ if serial and a.threads>1:notes.append('This module/backend is serial; eight requested threads do not create eight-way parallelism.')
  if len(allowed)<a.threads and not serial:notes.append('Oversubscribed workers may reduce performance.')
  if a.metric=='neural':notes.append('Plugin controls parallelism; --threads does not parallelize a serial plugin.')
  for note in notes:print('NOTE:',note)
@@ -156,8 +178,9 @@ def run(a):
   args=['-n',str(total) if a.metric=='UL' else '3','-s',str(snr),'-S',str(snr+0.01),'-r',str(a.rb or 50),'-R',str(a.carrier_rb or 106),'-m',str(a.mcs if a.mcs is not None else 14),'-l',str(a.symbols or 13)]
   if a.metric=='DL':args+=['-X','n' if n==0 else ','.join(['-1']*8)]
  elif a.metric=='neural':
-  if not a.library or not a.weights:raise BenchError('Provide external --library and --weights')
-  lib=str(P(a.library).resolve());weights=str(P(a.weights).resolve())
+  model=a.engine if a.neural_backend=='tensorrt' else a.weights
+  if not a.library or not model:raise BenchError('Provide --library and '+('--engine for tensorrt' if a.neural_backend=='tensorrt' else '--weights for native'))
+  lib=str(P(a.library).resolve());weights=str(P(model).resolve())
   if not P(lib).is_file() or not P(weights).is_file():raise BenchError('Plugin or weight file does not exist')
   env.update(NATIVE_TEST_LIB=lib,OAI_NRX_WEIGHTS=weights,OAI_NRX_OUT_SCALE='4',OAI_NRX_RX_SCALE='1',XSAI_RECEIVER_NATIVE_WEIGHTS=weights,XSAI_RECEIVER_LLR_GAIN='4',XSAI_RECEIVER_H_INTERP='1');args=[str(a.seed),str(a.seconds or 1.5)]
  else:
@@ -171,7 +194,13 @@ def run(a):
  with benchmark_lock(wait=a.wait_lock),fixed_frequency(allowed,a.freq) as before:
   out=P(a.out).resolve() if a.out else ROOT/'results'/(datetime.datetime.now().strftime('%Y%m%d-%H%M%S')+'-'+a.metric+'-'+uuid.uuid4().hex[:6]);out.mkdir(parents=True,exist_ok=False)
   meta=dict(status='running',metric=a.metric,threads_requested=a.threads,workers_configured=n,cpus=cpus,seed=a.seed,config=c,argv=cmd,env=changes,notes=notes,frequency_before=before,pmu=c.get('metric_pmu',{}).get(a.metric,False),kernel=subprocess.check_output(['uname','-a'],text=True).strip(),libdfts_sha256=sha(b/'libdfts.so'),warmup_calls=warmup,input_bank=a.input_bank,cache_protocol='fixed-input warm-cache steady state' if a.input_bank==1 else 'cycling pregenerated bank; not guaranteed cold-cache')
-  if a.metric=='neural':meta.update(plugin_sha256=sha(a.library),weights_sha256=sha(a.weights))
+  if a.metric=='neural':
+   meta.update(plugin_sha256=sha(a.library),model_sha256=sha(weights),neural_backend=a.neural_backend)
+   meta['engine_sha256' if a.neural_backend=='tensorrt' else 'weights_sha256']=sha(weights)
+   if a.neural_backend=='tensorrt':
+    cfg=out/'plugins/neural_receiver/config';cfg.mkdir(parents=True)
+    (cfg/'receiver_trt.config').write_text(weights+'\n')
+    meta['notes'].append('Official TensorRT callback includes its stream synchronization. CPU cores exclude GPU work; --threads only constrains host CPUs.')
   save(out/'metadata.json',meta);p=None
   try:
    with (out/'run.log').open('w') as f:
@@ -180,6 +209,7 @@ def run(a):
     rc=p.wait()
    meta['returncode']=rc
    if rc:raise BenchError(f'Benchmark failed ({rc}), see {out}/run.log')
+   if a.metric=='neural':check_neural_log((out/'run.log').read_text(),a.neural_backend)
    if a.freq:check_frequency(allowed,a.freq)
    raw,parsed=records((out/'run.log').read_text(),warmup)
    if not parsed:raise BenchError('Missing result records')
@@ -220,9 +250,9 @@ def locked_build(a):
 def make_parser():
  ap=argparse.ArgumentParser(description=__doc__);sp=ap.add_subparsers(dest='command',required=True)
  for name in ('doctor','build'):
-  b=sp.add_parser(name);b.add_argument('--xsai',required=True);b.add_argument('--build');b.add_argument('--cc',default='gcc-16')
+  b=sp.add_parser(name);b.add_argument('--xsai','--srk','--source',dest='xsai',required=True);b.add_argument('--build');b.add_argument('--cc');b.add_argument('--profile',choices=['auto','xsai','official'],default='auto')
   if name=='build':b.add_argument('--only',default='all');b.add_argument('--pmu',action='store_true')
- r=sp.add_parser('run');r.add_argument('metric',choices=NAMES);r.add_argument('--threads',type=int,choices=[1,8],required=True);r.add_argument('--cpus');r.add_argument('--freq',type=int);r.add_argument('--seed',type=int,default=20261022);r.add_argument('--seconds',type=float);r.add_argument('--library');r.add_argument('--weights');r.add_argument('--launcher');r.add_argument('--out');r.add_argument('--print-command',action='store_true');r.add_argument('--wait-lock',action='store_true')
+ r=sp.add_parser('run');r.add_argument('metric',choices=NAMES);r.add_argument('--threads',type=int,choices=[1,8],required=True);r.add_argument('--cpus');r.add_argument('--freq',type=int);r.add_argument('--seed',type=int,default=20261022);r.add_argument('--seconds',type=float);r.add_argument('--library');r.add_argument('--weights');r.add_argument('--engine');r.add_argument('--neural-backend',choices=['native','tensorrt'],default='native');r.add_argument('--launcher');r.add_argument('--out');r.add_argument('--print-command',action='store_true');r.add_argument('--wait-lock',action='store_true')
  for opt in ('warmup','rb','carrier-rb','mcs','symbols','trials'):r.add_argument('--'+opt,type=int)
  r.add_argument('--snr',type=float);r.add_argument('--input-bank',type=int,default=1);r.add_argument('--iterations',type=int,default=10000);r.add_argument('--batches',type=int,default=7)
  r.add_argument('--verify',choices=['strict','report','skip'],default='strict');r.add_argument('--skip-verify',dest='verify',action='store_const',const='skip')

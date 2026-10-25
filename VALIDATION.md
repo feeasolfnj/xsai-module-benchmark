@@ -1,5 +1,40 @@
 # Validation record
 
+## 2026-10-25 architecture adaptation
+
+- Final K3 XSAI/RVV profile: all 22 on-device smoke checks passed, including
+  nine metrics with one/eight requested threads, sparse CPU selection, and
+  three rejected invalid configurations. All 26 Python/C regression tests passed
+  on K3. No new PMU/cycle-counting feature was added in this revision.
+- The new CMake-derived `official` build path also rebuilt all executables
+  against the same K3 XSAI tree and passed all 22 smoke checks. Here its DFT
+  backend used the local original serial implementation. This validates the
+  builder and runtime path; it is **not** proof of official upstream ABI
+  compatibility on x86-64 or ARM64.
+- Both **x86-64 and ARM64** completed real official SRK CPU builds and
+  all **16 runs per architecture** (eight CPU metrics, one/eight requested
+  threads) in [workflow run 40154505445](https://github.com/feeasolfnj/xsai-module-benchmark/actions/runs/40154505445).
+  Each architecture also passed the then-current 25 regression tests at
+  `c2a6d2a7ac658d1ca0b1a16c3a4391f1fc21c685`. The suite now contains 26
+  tests, adding an explicit CPU-only doctor case; subsequent workflow runs
+  also exercise doctor before building.
+  Sources: SRK `37ef3311e9a6ccb5f1ecd4df2cba970917539a86` and OAI
+  `2025.w34` (`207aac94d13e714abac8062ebf869805f2acd6dc`), with a CI-only
+  fixture disabling GPU plugin initialization. These are execution checks,
+  not just cross-compilation. Hosted-runner timings are smoke-test data,
+  not a hardware performance comparison with K3.
+- Full OAI integration used Makefiles. Ninja command/flag extraction has
+  regression coverage; a complete official OAI Ninja build was not repeated.
+- TensorRT engine configuration and failure detection have been implemented;
+  GPU inference has not yet been executed on an NVIDIA-equipped Linux machine.
+
+The standalone PUSCH runner returns after all jobs complete and outputs are
+checked. Process exit reclaims the private waiting workers, avoiding a teardown
+join that stalled during an oversubscribed test; teardown is outside timing.
+Smoke-test timeouts now terminate their whole child process group.
+
+See [MULTIARCH.md](MULTIARCH.md) for architecture/backend distinctions.
+
 ## 2026-10-24 usability revision
 
 Validated from a **fresh GitHub clone** of the usability revision on K3,
