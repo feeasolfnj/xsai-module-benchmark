@@ -17,7 +17,7 @@
 | UL | nr_ulschsim | 50 RB、两个码块的整个TB译码 |
 | DL | nr_dlschsim | 50 RB、两个码块的整个编码调用 |
 | neural | test_neural | 24 RB，完整receiver_compute_llr插件回调 |
-| dft / idft | bench-coop | 单份2048点变换，原单线程或八线程协同候选 |
+| dft / idft | bench-coop | 单份2048点变换；K3 RVV 可八线程协同，官方配置使用本地串行原实现 |
 
 PUSCH估计、测量、符号处理是提取的原处理区域；不是上游正式发布的独立模块API。构建时链接本地XSAI库。源码/结构体不兼容时必须修改适配，不保证任意XSAI版本都能编译。
 

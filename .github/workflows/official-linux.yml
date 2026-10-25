@@ -64,7 +64,9 @@ jobs:
           path: ${{ runner.temp }}/ccache
           key: official-${{ runner.arch }}-${{ steps.native.outputs.cpu_key }}-${{ github.run_id }}
       - name: Build benchmarks against official local libraries
-        run: python3 bench.py build --srk "$RUNNER_TEMP/oai" --build "$RUNNER_TEMP/oai/build" --profile official
+        run: |
+          python3 bench.py doctor --srk "$RUNNER_TEMP/oai" --build "$RUNNER_TEMP/oai/build" --profile official
+          python3 bench.py build --srk "$RUNNER_TEMP/oai" --build "$RUNNER_TEMP/oai/build" --profile official
       - name: Execute each CPU module, one and eight requested threads
         run: python3 tests/official_smoke.py
       - name: Regression tests

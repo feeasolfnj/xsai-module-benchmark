@@ -13,7 +13,7 @@ python3 bench.py run symbol --threads 1
 python3 bench.py run symbol --threads 8
 ```
 
-前提是 K3 Linux、RVV、Python 3.10+、GCC16、C++链接器、ar、taskset，以及兼容的本地 XSAI 源码和 CMake 构建目录。保留生成的头文件、静态库、动态库。补建缺失helper时需要 flags.make，或开启 CMAKE_EXPORT_COMPILE_COMMANDS 后的 compile_commands.json；完整Ninja构建不会仅因缺少flags.make而被拒绝。Ninja缺MAC库时按doctor提示先构建MAC_UE_NR目标。仅安装几个动态库不够。构建目录不同则为 doctor/build 加 `--build /path/to/build`。
+K3 的 xsai 配置前提是 Linux、RVV、Python 3.10+、GCC16、C++链接器、ar、taskset，以及兼容的本地 XSAI 源码和 CMake 构建目录。x86-64 / ARM64 的 official 配置使用本地 OAI 的编译器与架构参数，具体环境见 MULTIARCH.md。保留生成的头文件、静态库、动态库。补建缺失helper时需要 flags.make，或开启 CMAKE_EXPORT_COMPILE_COMMANDS 后的 compile_commands.json；完整Ninja构建不会仅因缺少flags.make而被拒绝。Ninja缺MAC库时按doctor提示先构建MAC_UE_NR目标。仅安装几个动态库不够。构建目录不同则为 doctor/build 加 `--build /path/to/build`。
 
 doctor 列出缺失库和补建命令，不安装软件、不修改 XSAI 源码。MAC 依赖可在 benchmark 私有 build 目录补建。上游 asn1c/LTE SSE 等问题仍需按 XSAI 文档处理。
 

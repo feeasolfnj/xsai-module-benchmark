@@ -12,6 +12,33 @@ from bench_support import BenchError
 
 
 class PlatformBuildTests(unittest.TestCase):
+    def test_official_cpu_doctor_respects_disabled_plugins(self):
+        import contextlib
+        import io
+        from types import SimpleNamespace
+        from bench import doctor
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            root = pathlib.Path(tmp)
+            header = root / 'openair1/PHY/defs_gNB.h'
+            header.parent.mkdir(parents=True)
+            header.write_text('')
+            build = root / 'build'
+            build.mkdir()
+            (build / 'CMakeCache.txt').write_text('ENABLE_PLUGINS:STRING=OFF\n')
+            elf = bytearray(20)
+            elf[:4] = b'\x7fELF'
+            elf[5] = 1
+            elf[18:20] = (183).to_bytes(2, 'little')
+            (build / 'libdfts.so').write_bytes(elf)
+            for name in ('libMAC_UE_NR.a', 'libSCHED_NR_UE_LIB.a', 'libL2_NR.a', 'libnr_ue_phy_meas.a'):
+                (build / name).write_bytes(b'')
+            output = io.StringIO()
+            args = SimpleNamespace(xsai=str(root), build=str(build), cc='cc', profile='official')
+            with patch('bench.compiler', return_value='cc'), patch('bench.host_arch', return_value='aarch64'), patch('shutil.which', return_value='/usr/bin/cc'), contextlib.redirect_stdout(output):
+                doctor(args)
+            self.assertIn('Preflight passed', output.getvalue())
+            self.assertIn('explicitly disables plugins', output.getvalue())
+
     def test_ninja_linker_shell_wrappers_and_quoted_paths(self):
         import subprocess
         with tempfile.TemporaryDirectory(dir=ROOT) as tmp:

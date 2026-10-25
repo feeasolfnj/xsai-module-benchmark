@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Independent, relocatable XSAI module benchmark launcher (64-bit Linux: RISC-V, x86-64, ARM64)."""
 import argparse,csv,datetime,math,hashlib,json,os,pathlib,re,shlex,shutil,subprocess,sys,uuid,statistics
-from platform_build import source_root, compiler, host_arch, check_library_arch, build_official
+from platform_build import source_root, compiler, host_arch, check_library_arch, build_official, cache_value
 from bench_support import BenchError, select_cpus, benchmark_lock, fixed_frequency, frequency_snapshot, check_frequency, records, write_csv, summary
 P=pathlib.Path;ROOT=P(__file__).resolve().parent
 NAMES={'estimation':'test_pusch_estimation','measurement':'test_pusch_measurement','symbol':'test_pusch_symbol','llr':'test_llr_region','UL':'nr_ulschsim','DL':'nr_dlschsim','neural':'test_neural','dft':'bench-coop','idft':'bench-coop'}
@@ -119,16 +119,20 @@ def build(a):
 def doctor(a):
  xsai=source_root(a.xsai);b=P(a.build).resolve() if a.build else xsai/'cmake_targets/ran_build/build';missing=[]
  a.cc=compiler(b,a.cc)
- print('Architecture:',host_arch());print('Profile:',a.profile);print('Source:',xsai);print('Build:',b);print('Compiler:',shutil.which(a.cc))
+ arch=host_arch();profile=a.profile if a.profile!='auto' else ('xsai' if arch=='riscv64' else 'official')
+ print('Architecture:',arch);print('Profile:',profile);print('Source:',xsai);print('Build:',b);print('Compiler:',shutil.which(a.cc))
+ if (b/'libdfts.so').is_file():check_library_arch(b/'libdfts.so',arch)
  if not shutil.which(a.cc):missing.append(a.cc)
  for name,target in {'libdfts.so':'dfts','libMAC_UE_NR.a':'MAC_UE_NR','libSCHED_NR_UE_LIB.a':'SCHED_NR_UE_LIB','libL2_NR.a':'L2_NR','libnr_ue_phy_meas.a':'nr_ue_phy_meas','libplugins_plugins.a':'plugins_plugins'}.items():
+  if profile=='official' and name=='libplugins_plugins.a' and cache_value(b,'ENABLE_PLUGINS') in ('OFF','0','FALSE'):
+   print('NOTE: local CMake explicitly disables plugins; no GPU plugin archive required for CPU modules');continue
   found=(b/name).is_file() or any(b.glob('**/'+name));print(('OK ' if found else 'MISSING ')+name)
   if not found and name=='libMAC_UE_NR.a' and (b/'CMakeFiles/MAC_UE_NR.dir/link.txt').exists():print('  will construct a private archive inside benchmark/build');continue
   if not found:missing.append(name);print('  repair:',shlex.join(['cmake','--build',str(b),'--target',target,'-j','8']))
  if not (b/'CMakeFiles/PHY_NR.dir/flags.make').exists():print('NOTE: no flags.make; missing helper rebuilds require compile_commands.json (CMAKE_EXPORT_COMPILE_COMMANDS=ON). Complete Ninja builds may already contain the helpers.')
  if hasattr(os,'sched_getaffinity'):print('Allowed CPUs:',sorted(os.sched_getaffinity(0)))
  print('ASN.1: apt asn1c 0.9.28 lacks -gen-APER; follow your XSAI setup. Build required NR targets if unrelated LTE/SSE targets fail.')
- print('Neural requires an external ABI-compatible plugin and weights; required CPU type depends on that plugin.')
+ print('Neural requires an external ABI-compatible plugin plus native weights or a TensorRT engine; hardware requirements depend on that plugin.')
  if missing:raise BenchError('Preflight incomplete: '+', '.join(missing))
  print('Preflight passed; actual source/API compatibility is checked by build.')
 
