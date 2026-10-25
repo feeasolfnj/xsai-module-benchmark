@@ -1,0 +1,49 @@
+name: Official SRK CPU modules
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  official:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: System dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y build-essential cmake ninja-build autoconf automake libtool bison flex libconfig-dev libsctp-dev libssl-dev zlib1g-dev libblas-dev liblapacke-dev libyaml-cpp-dev libsimde-dev libforms-dev libxft-dev libusb-1.0-0-dev libgnutls28-dev libboost-all-dev python3-numpy python3-mako
+      - name: Build the OAI ASN.1 compiler
+        run: |
+          git clone https://github.com/mouse07410/asn1c "$RUNNER_TEMP/asn1c"
+          cd "$RUNNER_TEMP/asn1c"
+          git checkout 940dd5fa9f3917913fd487b13dfddfacd0ded06e
+          autoreconf -iv
+          ./configure --prefix="$RUNNER_TEMP/asn1c-install"
+          make -j2
+          make install
+      - name: Prepare pinned official sources
+        run: |
+          git clone https://github.com/NVlabs/sionna-rk.git "$RUNNER_TEMP/srk"
+          git -C "$RUNNER_TEMP/srk" checkout 37ef3311e9a6ccb5f1ecd4df2cba970917539a86
+          git clone --depth 1 --branch 2025.w34 https://github.com/OPENAIRINTERFACE/openairinterface5g.git "$RUNNER_TEMP/oai"
+          python3 tests/prepare_official_ci.py "$RUNNER_TEMP/srk" "$RUNNER_TEMP/oai"
+      - name: Build local OAI dependencies
+        run: |
+          cmake -S "$RUNNER_TEMP/oai" -B "$RUNNER_TEMP/oai/build" -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DASN1C_EXEC="$RUNNER_TEMP/asn1c-install/bin/asn1c" -DENABLE_PLUGINS=OFF -DENABLE_CUDA=OFF -DENABLE_TESTS=OFF
+          cmake --build "$RUNNER_TEMP/oai/build" --target nr_ulsim nr_dlsim dfts ldpc nrLDPC_coding --parallel 2
+      - name: Build benchmarks against official local libraries
+        run: python3 bench.py build --srk "$RUNNER_TEMP/oai" --build "$RUNNER_TEMP/oai/build" --profile official
+      - name: Execute each CPU module, one and eight requested threads
+        run: python3 tests/official_smoke.py
+      - name: Regression tests
+        run: python3 -m unittest discover -s tests -v
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: official-${{ matrix.os }}
+          path: |
+            results/
+            build/build-commands.json
+            build/provenance.json
