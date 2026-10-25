@@ -93,7 +93,7 @@ python3 bench.py run symbol --threads 8 --wait-lock
 
 `cores` 是CPU时间/对应墙钟窗口。PUSCH用核量窗口包含恢复/周期性检查，模块耗时窗口不包含它们；neural逐回调、LLR/DFT按批次统计。它不是“曾参与的物理核个数”，也不能跨口径直接当并行效率。
 
-改源码或构建失败后拒绝运行旧二进制，需重建。默认无PMU；DFT仍无周期统计。PMU包含同步和访存停顿，不能称为无任何系统影响的纯指令周期。
+改源码或构建失败后拒绝运行旧二进制，需重建。默认自动尝试PMU，包含DFT/IDFT；不支持或无权限时记录null并继续耗时测试。`--cycles off`关闭采集，`--cycles required`要求有效硬件计数。详见 [CYCLES.md](CYCLES.md)。PMU包含同步和访存停顿，不能称为无任何系统影响的纯指令周期。
 
 ```bash
 python3 -m unittest discover -s tests -v

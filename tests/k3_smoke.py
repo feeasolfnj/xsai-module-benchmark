@@ -32,7 +32,11 @@ def check(label, argv, expected=0):
         record['result_dir']=str(output)
         rows=json.loads((output/'results.json').read_text())
         if any(row['phase']=='warmup' for row in rows):raise RuntimeError('Warmup leaked into measured results')
-        if argv[1] in ('UL','DL') and len(rows)!=3:raise RuntimeError(f'Expected 3 measured codec records, got {len(rows)}')
+        codec_rows=[r for r in rows if r['record_type'] in ('CODING_UL','CODING_DL')]
+        if argv[1] in ('UL','DL') and len(codec_rows)!=3:raise RuntimeError(f'Expected 3 measured codec records, got {len(codec_rows)}')
+        cycles=json.loads((output/'cycles.json').read_text())
+        if cycles['status'] not in ('available','unavailable','invalid','disabled'):raise RuntimeError('Missing cycle status')
+        if cycles['status']!='available' and cycles['cycles'] is not None:raise RuntimeError('Unavailable cycles must be null')
         if argv[1] in ('dft','idft') and rows[0]['verification']!='passed':raise RuntimeError('Strict DFT check did not pass')
     outcomes.append(record);print('PASS',label,flush=True)
 
