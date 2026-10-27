@@ -35,7 +35,7 @@ python3 bench.py sweep examples/sweep.json
 - CPU 集可不连续、可少于工作线程数；超额订阅会提示风险。taskset 限制允许集，没有逐线程一核绑定。
 - 1Rx estimation、measurement、llr 是串行后端，八线程配置会明确提示，不自动获得并行加速。
 - 神经插件自行决定线程数量，`--threads` 不会把单线程插件自动并行化。
-- `--input-bank` 支持 PUSCH/LLR/neural/DFT，1–16组。UL逐trial生成随机LLR，DL仍复用随机payload，不支持输入库。
+- `--input-bank` 支持 PUSCH/LLR/neural/demapper/DFT，1–16组。UL将一份随机payload编码后，每trial加入新AWGN；DL仍复用随机payload，不支持输入库。
 - 输入生成在计时外；PUSCH恢复也在模块计时外。LLR批内切换指针、DFT选择索引的开销计入批次时间。输入库不保证冷缓存。
 - RB/MCS/符号数/SNR/trials 仅用于 UL/DL；层数固定1，其余PUSCH规模仍固定。不能对不支持的模块静默应用选项。
 - `--seconds` 仅用于PUSCH/LLR/neural。UL/DL用 `--trials`；DFT用 `--iterations` 和 `--batches`。
@@ -89,7 +89,7 @@ python3 bench.py run symbol --threads 8 --wait-lock
 - results.csv/json：正式记录，剔除UL/DL预热。
 - summary.json：正式调用均值、平均用核量和DFT批均值指标。
 
-`status=passed` 表示运行流程完成，算法检查另看 `verification/verification_scope`；report模式可能完成运行但比较失败。PUSCH只检查串行等价，neural/LLR/DL主要检查重复性。UL随机LLR不保证合法码字，不可据此报告BLER或译码正确性。
+`status=passed` 表示运行流程完成，算法检查另看 `verification/verification_scope`；report模式可能完成运行但比较失败。PUSCH只检查串行等价，neural/LLR/DL主要检查重复性。UL使用合法码字加噪输入，`decoder_quality` 记录剔除预热后的成功数、失败数、BLER及译码前BER；低SNR下译码失败仍可正常报告，不把计时完成当作译码成功。
 
 `cores` 是CPU时间/对应墙钟窗口。PUSCH用核量窗口包含恢复/周期性检查，模块耗时窗口不包含它们；neural逐回调、LLR/DFT按批次统计。它不是“曾参与的物理核个数”，也不能跨口径直接当并行效率。
 

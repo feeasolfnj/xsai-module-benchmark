@@ -145,7 +145,7 @@ int main(int argc, char **argv)
   //logInit();
   randominit(0);
   unsigned random_seed=getenv("RANDOM_SEED")?strtoul(getenv("RANDOM_SEED"),NULL,0):20261022; srand(random_seed);
-  printf("[RANDOM_INPUT] seed=%u source=direct_prng input_files=0\n",random_seed);
+  printf("[RANDOM_INPUT] seed=%u source=encoded_bpsk_awgn input_files=0\n",random_seed);
 
   int c;
   while ((c = getopt(argc, argv, "--:O:hg:n:s:S:py:z:M:N:R:F:m:l:q:r:W:")) != -1) {
@@ -478,7 +478,6 @@ int main(int argc, char **argv)
   ///////////////////////////////////////////////////
 
   double modulated_input[16 * 68 * 384]; // [hna] 16 segments, 68*Zc
-  short channel_output_uncoded[16 * 68 * 384];
   unsigned int errors_bit_uncoded = 0;
 
   /////////////////////////[adk] preparing UL harq_process parameters/////////////////////////
@@ -527,7 +526,17 @@ int main(int argc, char **argv)
   ///////////
   ////////////////////////////////////////////////////////////////////
 
+  /* Match the upstream coding test: one random payload/codeword, fresh AWGN
+   * per trial. Reset the channel RNG after setup so scheduling cannot change
+   * the single/eight-worker input sequence. Encoding stays outside timing. */
+  randominit(random_seed);
   for (SNR = snr0; SNR < snr1 && !stop; SNR += snr_step) {
+    SNR_lin = pow(10.0, SNR / 10.0);
+    sigma = 1.0 / sqrt(2.0 * SNR_lin);
+    AssertFatal(isfinite(SNR_lin) && SNR_lin > 0 && isfinite(sigma) && sigma > 0,
+                "SNR cannot produce a finite positive noise variance\n");
+    printf("[DECODER_INPUT] mode=encoded_bpsk_awgn snr_db=%.6f sigma=%.12g qbits=%u payload_hash=%llu coded_bits=%u\n",
+           SNR,sigma,qbits,coding_hash(test_input,TBS/8),available_bits);
     errors_bit_uncoded = 0;
     n_errors = 0;
     n_false_positive = 0;
@@ -536,9 +545,16 @@ int main(int argc, char **argv)
       memset(pusch_vars->llr, 0, (8 * ((3 * 8 * 6144) + 12)) * sizeof(int16_t));
       harq_process_gNB->harq_to_be_cleared = true;
 
-      // Direct random LLRs; no codeword modulation/channel output is used.
-      unsigned rng=random_seed+(unsigned)trial*2654435761u;if(!rng)rng=1;
-      for(i=0;i<available_bits;i++){rng^=rng<<13;rng^=rng>>17;rng^=rng<<5;pusch_vars->llr[i]=(int16_t)((int)(rng%255)-127);}
+      unsigned trial_uncoded_errors = 0;
+      for (i = 0; i < available_bits; i++) {
+        /* Encoder output is bit-packed, least-significant bit first. */
+        unsigned bit = (harq_process_ul_ue->f[i >> 3] >> (i & 7)) & 1;
+        modulated_input[i] = bit ? -1.0 : 1.0;
+        pusch_vars->llr[i] = (int16_t)quantize(sigma / 16.0,
+                                             modulated_input[i] + sigma * gaussdouble(0.0,1.0),qbits);
+        trial_uncoded_errors += ((pusch_vars->llr[i] < 0) != bit);
+      }
+      errors_bit_uncoded += trial_uncoded_errors;
  /*
       printf("errors bits uncoded %u\n", errors_bit_uncoded);
       printf("\n");
@@ -559,16 +575,17 @@ int main(int argc, char **argv)
       if(trial>=(getenv("CODING_WARMUP")?atoi(getenv("CODING_WARMUP")):10))pmu_end(1);
       int segs=gNB->ts_ldpc_decode.trials-old_trials;
       double segment_sum=get_time_meas_us(&gNB->ts_ldpc_decode)*gNB->ts_ldpc_decode.trials-old_total;
-      printf("[CODING_UL] trial=%d wall_us=%.6f cpu_us=%.6f segments=%d segment_sum_us=%.6f per_segment_us=%.6f input_hash=%llu output_hash=%llu\n",trial,wall_us,cpu_us,segs,segment_sum,segs?segment_sum/segs:0,input_hash,coding_hash(harq_process_gNB->b,TBS/8));
-
-      if (harq_process_gNB->processedSegments == harq_process_gNB->C) {
-        bool crc_valid = check_crc(harq_process_gNB->b, lenWithCrc(1, (harq_process_gNB->TBS) << 3), crcType(1, (harq_process_gNB->TBS) << 3));
-        if (!crc_valid || memcmp(harq_process_gNB->b,test_input,TBS/8)!=0) {
-          n_false_positive++;
-        }
-      } else {
-        n_errors++;
-      }
+      bool assembled = harq_process_gNB->C > 0 && harq_process_gNB->processedSegments == harq_process_gNB->C;
+      bool crc_valid = assembled && check_crc(harq_process_gNB->b,
+          lenWithCrc(1,(harq_process_gNB->TBS)<<3),crcType(1,(harq_process_gNB->TBS)<<3));
+      bool payload_match = assembled && memcmp(harq_process_gNB->b,test_input,TBS/8)==0;
+      bool decode_success = crc_valid && payload_match;
+      n_errors += !decode_success;
+      n_false_positive += crc_valid && !payload_match;
+      printf("[CODING_UL] trial=%d wall_us=%.6f cpu_us=%.6f segments=%d segment_sum_us=%.6f per_segment_us=%.6f input_hash=%llu output_hash=%llu input_mode=encoded_bpsk_awgn snr_db=%.6f decode_success=%d crc_valid=%d payload_match=%d uncoded_bit_errors=%u coded_bits=%u payload_bits=%u\n",
+             trial,wall_us,cpu_us,segs,segment_sum,segs?segment_sum/segs:0,input_hash,
+             coding_hash(harq_process_gNB->b,TBS/8),SNR,decode_success,crc_valid,payload_match,
+             trial_uncoded_errors,available_bits,TBS);
     }
 
     printf("*****************************************\n");
@@ -613,7 +630,7 @@ int main(int argc, char **argv)
   loader_reset();
   logTerm();
 
-  printf("[RANDOM_DECODER] trials=%d rejected=%d false_positive=%d quality_metric=not_applicable\n",n_trials,n_errors,n_false_positive);
+  printf("[ENCODED_DECODER] trials=%d failed=%d false_positive=%d input_mode=encoded_bpsk_awgn\n",n_trials,n_errors,n_false_positive);
   return 0;
 }
 

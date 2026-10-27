@@ -104,6 +104,34 @@ def summary(rows):
     return result
 
 
+def decoder_quality(rows):
+    """Use measured trials only; successful decoding requires CRC and payload."""
+    trials = [r for r in rows if r['record_type'] == 'CODING_UL' and r.get('phase') == 'measurement']
+    if not trials:
+        raise BenchError('Missing measured UL decoder trials')
+    successes = false_positives = bit_errors = coded_bits = 0
+    for row in trials:
+        if row.get('input_mode') != 'encoded_bpsk_awgn':
+            raise BenchError('UL input protocol is not encoded_bpsk_awgn; rebuild UL')
+        flags = [int(row[k]) for k in ('decode_success', 'crc_valid', 'payload_match')]
+        success, crc, match = flags
+        if any(x not in (0, 1) for x in flags) or success != (crc and match):
+            raise BenchError('Inconsistent CRC/payload decoder status')
+        errors, bits = int(row['uncoded_bit_errors']), int(row['coded_bits'])
+        if bits <= 0 or not 0 <= errors <= bits:
+            raise BenchError('Invalid uncoded BER counts')
+        successes += success
+        false_positives += crc and not match
+        bit_errors += errors
+        coded_bits += bits
+    return dict(input_mode='encoded_bpsk_awgn', measured_trials=len(trials),
+                succeeded=successes, failed=len(trials)-successes,
+                bler=(len(trials)-successes)/len(trials), false_positives=false_positives,
+                uncoded_bit_errors=bit_errors, coded_bits=coded_bits,
+                uncoded_ber=bit_errors/coded_bits,
+                success_definition='crc_valid_and_payload_matches_original')
+
+
 def frequency_snapshot(cpus, root=pathlib.Path('/sys/devices/system/cpu')):
     policies = {}
     for cpu in cpus:

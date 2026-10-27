@@ -107,7 +107,7 @@ python3 bench.py run neural --threads 1 --neural-backend tensorrt \
 
 随机范围、计时边界、预热剔除、验证范围沿用 [USAGE.md](USAGE.md) 和 [README.md](README.md)。
 所有架构默认尝试采集硬件 CPU 周期；未暴露 PMU 或权限不足时周期为 null，耗时继续测试。可使用 `--cycles off/required`，详见 [CYCLES.md](CYCLES.md)。
-随机 UL LLR 不满足编码约束，译码可能全部失败；这是工作量/耗时测试，不是 BLER/BER 性能评估。
+UL 当前默认从随机payload编码、BPSK映射、AWGN及量化构造合法码字对应的软输入，另报CRC和payload检查结果。旧版本直接随机LLR的全部失败结果属于不同输入协议，不能与新版混用；详见 [UL_DECODING.md](UL_DECODING.md)。
 DFT 的原生后端是调用本地库再检查重复一致性，不是独立数学参考正确性证明。
 1Rx 信道估计、测量和 LLR 仍为串行测试；八线程配置不保证八核同时计算。
 不同架构的频率、SIMD、编译器、库版本和缓存条件应随结果记录，不能将 hosted runner 的时间作为 K3 的硬件性能对照。

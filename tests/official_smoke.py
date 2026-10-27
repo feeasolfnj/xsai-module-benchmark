@@ -25,6 +25,9 @@ def run_case(args, expected=0):
     if expected:
         return None
     result_dir = pathlib.Path(output.rsplit('Results:', 1)[1].strip())
+    if 'UL' in args:
+        q = json.loads((result_dir / 'summary.json').read_text())['decoder_quality']
+        assert q['measured_trials'] == 2 and q['succeeded'] == 2 and not q['false_positives'], q
     cycles = json.loads((result_dir / 'cycles.json').read_text())
     assert cycles['status'] in ('available', 'unavailable', 'invalid', 'disabled'), cycles
     if cycles['status'] == 'available':

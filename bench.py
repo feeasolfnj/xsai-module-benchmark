@@ -2,7 +2,7 @@
 """Independent, relocatable XSAI module benchmark launcher (64-bit Linux: RISC-V, x86-64, ARM64)."""
 import argparse,csv,datetime,math,hashlib,json,os,pathlib,re,shlex,shutil,subprocess,sys,uuid,statistics
 from platform_build import source_root, compiler, host_arch, check_library_arch, build_official, cache_value
-from bench_support import BenchError, select_cpus, benchmark_lock, fixed_frequency, frequency_snapshot, check_frequency, records, write_csv, summary
+from bench_support import BenchError, select_cpus, benchmark_lock, fixed_frequency, frequency_snapshot, check_frequency, records, write_csv, summary, decoder_quality
 from cycle_support import cycle_result
 P=pathlib.Path;ROOT=P(__file__).resolve().parent
 NAMES={'estimation':'test_pusch_estimation','measurement':'test_pusch_measurement','symbol':'test_pusch_symbol','llr':'test_llr_region','UL':'nr_ulschsim','DL':'nr_dlschsim','neural':'test_neural','demapper':'test_demapper','dft':'bench-coop','idft':'bench-coop'}
@@ -215,6 +215,9 @@ def run(a):
   out=P(a.out).resolve() if a.out else ROOT/'results'/(datetime.datetime.now().strftime('%Y%m%d-%H%M%S')+'-'+a.metric+'-'+uuid.uuid4().hex[:6]);out.mkdir(parents=True,exist_ok=False)
   meta=dict(status='running',metric=a.metric,threads_requested=a.threads,workers_configured=n,cpus=cpus,seed=a.seed,config=c,argv=cmd,env=changes,notes=notes,frequency_before=before,pmu=c.get('metric_pmu',{}).get(a.metric,False),kernel=subprocess.check_output(['uname','-a'],text=True).strip(),libdfts_sha256=sha(b/'libdfts.so'),warmup_calls=warmup,input_bank=a.input_bank,cache_protocol='fixed-input warm-cache steady state' if a.input_bank==1 else 'cycling pregenerated bank; not guaranteed cold-cache')
   meta.update(cycles_mode=cycle_mode)
+  if a.metric=='UL':meta.update(decoder_input='encoded_bpsk_awgn',snr_db=snr,quantization_bits=8,
+                              payload_protocol='one_seeded_random_payload_encoded_once_fresh_awgn_each_trial',
+                              timing_scope='nr_ulsch_decoding_full_tb_excluding_input_generation_and_encoding')
   if a.metric in ('neural','demapper'):
    meta.update(plugin_sha256=sha(a.library),model_sha256=sha(weights) if weights else None,neural_backend=a.neural_backend)
    if weights:meta['engine_sha256' if a.neural_backend=='tensorrt' else 'weights_sha256']=sha(weights)
@@ -247,10 +250,16 @@ def run(a):
    if not any(row['record_type'] in ('RESULT','CODING_UL','CODING_DL') for row in parsed):raise BenchError('Missing result records')
    for row in raw:
     if row['record_type']=='RESULT' and 'verification_scope' not in row:row['verification_scope']='serial_same_implementation' if a.metric in ('estimation','measurement','symbol') else 'repeatability_same_implementation'
-    elif row['record_type']=='CODING_UL':row['verification_scope']='random_llr_not_decode_correctness'
+    elif row['record_type']=='CODING_UL':row['verification_scope']='crc_and_original_payload'
     elif row['record_type']=='CODING_DL':row['verification_scope']='repeatability_same_payload'
    save(out/'results.raw.json',raw);write_csv(out/'results.raw.csv',raw);save(out/'results.json',parsed);write_csv(out/'results.csv',parsed)
-   report=summary(parsed);report['hardware_cycles']=cycles;save(out/'summary.json',report);print(json.dumps(report,indent=2));meta['status']='passed'
+   report=summary(parsed);report['hardware_cycles']=cycles
+   if a.metric=='UL':
+    report['decoder_quality']=decoder_quality(parsed)
+    meta['decoder_quality']=report['decoder_quality']
+   save(out/'summary.json',report);print(json.dumps(report,indent=2))
+   if a.metric=='UL' and report['decoder_quality']['false_positives']:raise BenchError('Decoder CRC passed but payload differs; inspect decoder_quality and run.log')
+   meta['status']='passed'
   except BaseException as exc:meta['status']='failed';meta['error']=str(exc);raise
   finally:
    if p and p.poll() is None:p.terminate();p.wait(timeout=10)
