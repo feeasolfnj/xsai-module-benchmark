@@ -5,8 +5,8 @@ from platform_build import source_root, compiler, host_arch, check_library_arch,
 from bench_support import BenchError, select_cpus, benchmark_lock, fixed_frequency, frequency_snapshot, check_frequency, records, write_csv, summary
 from cycle_support import cycle_result
 P=pathlib.Path;ROOT=P(__file__).resolve().parent
-NAMES={'estimation':'test_pusch_estimation','measurement':'test_pusch_measurement','symbol':'test_pusch_symbol','llr':'test_llr_region','UL':'nr_ulschsim','DL':'nr_dlschsim','neural':'test_neural','dft':'bench-coop','idft':'bench-coop'}
-PAIRS={'estimation':(0,1),'measurement':(2,3),'symbol':(4,5),'neural':(6,7),'llr':(8,9),'UL':(10,11),'DL':(12,13),'dft':(14,16)}
+NAMES={'estimation':'test_pusch_estimation','measurement':'test_pusch_measurement','symbol':'test_pusch_symbol','llr':'test_llr_region','UL':'nr_ulschsim','DL':'nr_dlschsim','neural':'test_neural','demapper':'test_demapper','dft':'bench-coop','idft':'bench-coop'}
+PAIRS={'estimation':(0,1),'measurement':(2,3),'symbol':(4,5),'neural':(6,7),'llr':(8,9),'UL':(10,11),'DL':(12,13),'dft':(14,16),'demapper':None}
 def save(p,x):p.write_text(json.dumps(x,ensure_ascii=False,indent=2))
 def sha(p):return hashlib.sha256(P(p).read_bytes()).hexdigest()
 def check_neural_log(log,backend):
@@ -104,6 +104,11 @@ def build(a):
   return
  # validated above
  for key in dict.fromkeys(keys):
+  if key=='demapper':
+   build_official(ROOT,xsai,b,out,a.cc,[key],execute,True)
+   c['metric_pmu'][key]=True;ready[key]=source_signature(key)
+   save(ready_file,ready);save(ROOT/'config.local.json',c)
+   continue
   if key=='dft':
    cc=expand(recipes[14]);i=cc.index('-o');cc[i+1]=str(out/'parallel_fft.o');cc=[str(ROOT/'src/parallel_fft.c') if x==str(ROOT/'src/adapter.c') else x for x in cc];execute(cc)
    execute([*expand(recipes[15]),'-include',str(ROOT/'src/pmu_cycles.h')])
@@ -139,13 +144,14 @@ def doctor(a):
 
 
 def source_signature(key):
- sources={'estimation':['standalone.c'],'measurement':['standalone.c'],'symbol':['standalone.c'],'llr':['random_llr.c'],'neural':['random_neural.c'],'UL':['nr_ulschsim.c'],'DL':['nr_dlschsim.c'],'dft':['bench.c','adapter.c','parallel_fft.c']}
+ sources={'estimation':['standalone.c'],'measurement':['standalone.c'],'symbol':['standalone.c'],'llr':['random_llr.c'],'neural':['random_neural.c'],'demapper':['random_demapper.c'],'UL':['nr_ulschsim.c','codec_plugin_lifecycle.c'],'DL':['nr_dlschsim.c','codec_plugin_lifecycle.c'],'dft':['bench.c','adapter.c','parallel_fft.c']}
  files=[ROOT/'src'/name for name in sources[key]]+list((ROOT/'src').glob('*.h'))+[ROOT/'platform_build.py',ROOT/'bench.py',ROOT/'cycle_support.py',ROOT/'templates/commands.json']
  return {p.name:sha(p) for p in files}
 
 def run(a):
  if not hasattr(os,'sched_getaffinity'):raise BenchError('Running requires 64-bit Linux')
- if a.seconds is not None and (not math.isfinite(a.seconds) or a.seconds<=0 or a.metric in ('UL','DL','dft','idft')):raise BenchError('--seconds is only for PUSCH/LLR/neural; use --trials for UL/DL, --iterations for DFT')
+ if a.seconds is not None and (not math.isfinite(a.seconds) or a.seconds<=0 or a.metric in ('UL','DL','dft','idft')):raise BenchError('--seconds is only for PUSCH/LLR/neural/demapper; use --trials for UL/DL, --iterations for DFT')
+ if a.re is not None and (a.metric!='demapper' or not 1<=a.re<=32768):raise BenchError('--re is only for demapper and must be 1..32768')
  if a.input_bank<1 or a.input_bank>16:raise BenchError('--input-bank must be 1..16')
  if a.metric in ('UL','DL') and a.input_bank!=1:raise BenchError('Input banks are not supported for UL/DL')
  if a.metric not in ('UL','DL') and any(v is not None for v in (a.rb,a.carrier_rb,a.mcs,a.symbols,a.snr,a.trials)):raise BenchError('Radio/trial parameters apply only to UL/DL')
@@ -168,10 +174,10 @@ def run(a):
  serial=a.metric in ('estimation','measurement','llr') or (a.metric in ('dft','idft') and c.get('dft_backend')=='local-native-serial')
  if serial and a.threads>1:notes.append('This module/backend is serial; eight requested threads do not create eight-way parallelism.')
  if len(allowed)<a.threads and not serial:notes.append('Oversubscribed workers may reduce performance.')
- if a.metric=='neural':notes.append('Plugin controls parallelism; --threads does not parallelize a serial plugin.')
+ if a.metric in ('neural','demapper'):notes.append('Plugin controls parallelism; --threads does not parallelize a serial plugin.')
  for note in notes:print('NOTE:',note)
- n=0 if a.threads==1 or serial else 8
- warmup=a.warmup if a.warmup is not None else (10 if a.metric in ('UL','DL') else (10000 if a.metric in ('dft','idft') else (1000 if a.metric=='llr' else 20)))
+ n=0 if a.threads==1 or serial or a.metric=='demapper' else 8
+ warmup=a.warmup if a.warmup is not None else (10 if a.metric in ('UL','DL') else (10000 if a.metric in ('dft','idft') else (1000 if a.metric=='llr' else (100 if a.metric=='demapper' else 20))))
  if warmup<0:raise BenchError('--warmup must be >= 0')
  env=os.environ.copy();env.update(LD_LIBRARY_PATH=str(b)+(':'+env['LD_LIBRARY_PATH'] if env.get('LD_LIBRARY_PATH') else ''),RANDOM_SEED=str(a.seed),OAI_RNGSEED=str(a.seed),BENCH_CPU_LIST=cpus,RANDOM_CPU_START=str(min(allowed)),RANDOM_CPU_COUNT=str(len(allowed)),BENCH_INPUT_BANK=str(a.input_bank),BENCH_WARMUP=str(warmup))
  env['BENCH_CYCLES']=cycle_mode
@@ -182,12 +188,21 @@ def run(a):
   env.update(CODING_WORKERS=str(n),CODING_REPEATS=str(total),CODING_WARMUP=str(warmup))
   args=['-n',str(total) if a.metric=='UL' else '3','-s',str(snr),'-S',str(snr+0.01),'-r',str(a.rb or 50),'-R',str(a.carrier_rb or 106),'-m',str(a.mcs if a.mcs is not None else 14),'-l',str(a.symbols or 13)]
   if a.metric=='DL':args+=['-X','n' if n==0 else ','.join(['-1']*8)]
- elif a.metric=='neural':
+ elif a.metric in ('neural','demapper'):
   model=a.engine if a.neural_backend=='tensorrt' else a.weights
-  if not a.library or not model:raise BenchError('Provide --library and '+('--engine for tensorrt' if a.neural_backend=='tensorrt' else '--weights for native'))
-  lib=str(P(a.library).resolve());weights=str(P(model).resolve())
-  if not P(lib).is_file() or not P(weights).is_file():raise BenchError('Plugin or weight file does not exist')
-  env.update(NATIVE_TEST_LIB=lib,OAI_NRX_WEIGHTS=weights,OAI_NRX_OUT_SCALE='4',OAI_NRX_RX_SCALE='1',XSAI_RECEIVER_NATIVE_WEIGHTS=weights,XSAI_RECEIVER_LLR_GAIN='4',XSAI_RECEIVER_H_INTERP='1');args=[str(a.seed),str(a.seconds or 1.5)]
+  if not a.library or (not model and (a.metric=='neural' or a.neural_backend=='tensorrt')):raise BenchError('Provide --library and '+('--engine for tensorrt' if a.neural_backend=='tensorrt' else '--weights for native receiver'))
+  lib=str(P(a.library).resolve());weights=str(P(model).resolve()) if model else None
+  if not P(lib).is_file() or (weights and not P(weights).is_file()):raise BenchError('Plugin or weight file does not exist')
+  if weights and ('\n' in weights or '\r' in weights):raise BenchError('Model path cannot contain newlines')
+  if a.metric=='demapper' and a.neural_backend=='tensorrt' and env.get('PLAN_POSTFIX'):raise BenchError('Unset PLAN_POSTFIX and pass the exact demapper --engine path, so its hash matches the loaded engine')
+  check_library_arch(lib,host_arch())
+  args=[str(a.seed),str(a.seconds or 1.5)]
+  if a.metric=='neural':
+   env.update(NATIVE_TEST_LIB=lib,OAI_NRX_WEIGHTS=weights,OAI_NRX_OUT_SCALE='4',OAI_NRX_RX_SCALE='1',XSAI_RECEIVER_NATIVE_WEIGHTS=weights,XSAI_RECEIVER_LLR_GAIN='4',XSAI_RECEIVER_H_INTERP='1')
+  else:
+   env['BENCH_DEMAPPER_LIB']=lib
+   if weights:env.update(OAI_DEMAPPER_WEIGHTS=weights,XSAI_DEMAPPER_WEIGHTS=weights)
+   args.append(str(a.re or 600))
  else:
   env.update(COOP_EIGHT='1' if n else '0',BENCH_VERIFY=a.verify,BENCH_ITERATIONS=str(a.iterations),BENCH_BATCHES=str(a.batches));args=[a.metric,str(a.seed)]
  cmd=['taskset','-c',cpus,str(binary),*args]
@@ -200,13 +215,20 @@ def run(a):
   out=P(a.out).resolve() if a.out else ROOT/'results'/(datetime.datetime.now().strftime('%Y%m%d-%H%M%S')+'-'+a.metric+'-'+uuid.uuid4().hex[:6]);out.mkdir(parents=True,exist_ok=False)
   meta=dict(status='running',metric=a.metric,threads_requested=a.threads,workers_configured=n,cpus=cpus,seed=a.seed,config=c,argv=cmd,env=changes,notes=notes,frequency_before=before,pmu=c.get('metric_pmu',{}).get(a.metric,False),kernel=subprocess.check_output(['uname','-a'],text=True).strip(),libdfts_sha256=sha(b/'libdfts.so'),warmup_calls=warmup,input_bank=a.input_bank,cache_protocol='fixed-input warm-cache steady state' if a.input_bank==1 else 'cycling pregenerated bank; not guaranteed cold-cache')
   meta.update(cycles_mode=cycle_mode)
-  if a.metric=='neural':
-   meta.update(plugin_sha256=sha(a.library),model_sha256=sha(weights),neural_backend=a.neural_backend)
-   meta['engine_sha256' if a.neural_backend=='tensorrt' else 'weights_sha256']=sha(weights)
+  if a.metric in ('neural','demapper'):
+   meta.update(plugin_sha256=sha(a.library),model_sha256=sha(weights) if weights else None,neural_backend=a.neural_backend)
+   if weights:meta['engine_sha256' if a.neural_backend=='tensorrt' else 'weights_sha256']=sha(weights)
    if a.neural_backend=='tensorrt':
-    cfg=out/'plugins/neural_receiver/config';cfg.mkdir(parents=True)
-    (cfg/'receiver_trt.config').write_text(weights+'\n')
+    plugin='neural_receiver' if a.metric=='neural' else 'neural_demapper'
+    filename='receiver_trt.config' if a.metric=='neural' else 'demapper_trt.config'
+    cfg=out/'plugins'/plugin/'config';cfg.mkdir(parents=True)
+    (cfg/filename).write_text(weights+'\n'+('1\n' if a.metric=='demapper' else ''))
     meta['notes'].append('Official TensorRT callback includes its stream synchronization. CPU cores exclude GPU work; --threads only constrains host CPUs.')
+   if a.metric=='demapper':
+    meta.update(re=a.re or 600,qm=4,timing_scope='full_demapper_compute_llr',
+                verification_scope='repeatability_same_implementation',
+                model_selection='external_engine' if a.neural_backend=='tensorrt' else 'plugin_defined',
+                plugin_env={k:v for k,v in env.items() if k.startswith(('OAI_DEMAPPER_','XSAI_DEMAPPER_'))})
   save(out/'metadata.json',meta);p=None
   try:
    with (out/'run.log').open('w') as f:
@@ -219,7 +241,7 @@ def run(a):
    meta['hardware_cycles']=cycles;save(out/'cycles.json',cycles)
    if rc:raise BenchError(f'Benchmark failed ({rc}), see {out}/run.log')
    if cycle_mode=='required' and cycles['status']!='available':raise BenchError('Hardware cycles required but unavailable or invalid; see cycles.json')
-   if a.metric=='neural':check_neural_log((out/'run.log').read_text(),a.neural_backend)
+   if a.metric in ('neural','demapper'):check_neural_log((out/'run.log').read_text(),a.neural_backend)
    if a.freq:check_frequency(allowed,a.freq)
    raw,parsed=records((out/'run.log').read_text(),warmup)
    if not any(row['record_type'] in ('RESULT','CODING_UL','CODING_DL') for row in parsed):raise BenchError('Missing result records')
@@ -262,17 +284,24 @@ def make_parser():
  for name in ('doctor','build'):
   b=sp.add_parser(name);b.add_argument('--xsai','--srk','--source',dest='xsai',required=True);b.add_argument('--build');b.add_argument('--cc');b.add_argument('--profile',choices=['auto','xsai','official'],default='auto')
   if name=='build':b.add_argument('--only',default='all');b.add_argument('--pmu',action='store_true',help='Require hardware cycles by default at run time (otherwise auto-detect)')
- r=sp.add_parser('run');r.add_argument('metric',choices=NAMES);r.add_argument('--threads',type=int,choices=[1,8],required=True);r.add_argument('--cpus');r.add_argument('--freq',type=int);r.add_argument('--seed',type=int,default=20261022);r.add_argument('--seconds',type=float);r.add_argument('--library');r.add_argument('--weights');r.add_argument('--engine');r.add_argument('--neural-backend',choices=['native','tensorrt'],default='native');r.add_argument('--launcher');r.add_argument('--out');r.add_argument('--print-command',action='store_true');r.add_argument('--wait-lock',action='store_true')
+ r=sp.add_parser('run');r.add_argument('metric',choices=NAMES);r.add_argument('--threads',type=int,choices=[1,8],required=True);r.add_argument('--cpus');r.add_argument('--freq',type=int);r.add_argument('--seed',type=int,default=20261022);r.add_argument('--seconds',type=float);r.add_argument('--library');r.add_argument('--weights');r.add_argument('--engine');r.add_argument('--neural-backend','--backend',dest='neural_backend',choices=['native','tensorrt'],default='native');r.add_argument('--launcher');r.add_argument('--out');r.add_argument('--print-command',action='store_true');r.add_argument('--wait-lock',action='store_true')
  r.add_argument('--cycles',choices=['auto','off','required'],help='Auto-detect hardware CPU cycles (default); off avoids PMU collection; required fails if unavailable')
+ r.add_argument('--re',type=int,help='Demapper input RE count (default 600, 16-QAM only)')
  for opt in ('warmup','rb','carrier-rb','mcs','symbols','trials'):r.add_argument('--'+opt,type=int)
  r.add_argument('--snr',type=float);r.add_argument('--input-bank',type=int,default=1);r.add_argument('--iterations',type=int,default=10000);r.add_argument('--batches',type=int,default=7)
  r.add_argument('--verify',choices=['strict','report','skip'],default='strict');r.add_argument('--skip-verify',dest='verify',action='store_const',const='skip')
  sw=sp.add_parser('sweep');sw.add_argument('file',help='JSON list of run argument dictionaries')
+ official=sp.add_parser('official-demapper-test',help='Run upstream CUDA/TensorRT pytest accuracy tests (requires Sionna environment)')
+ official.add_argument('--srk',required=True);official.add_argument('--python',default=sys.executable);official.add_argument('--out')
  return ap
 
 def main():
  a=make_parser().parse_args()
- try: {'doctor':doctor,'build':locked_build,'run':run,'sweep':sweep}[a.command](a)
+ try:
+  if a.command=='official-demapper-test':
+   from official_demapper import run_official
+   run_official(a,ROOT)
+  else:{'doctor':doctor,'build':locked_build,'run':run,'sweep':sweep}[a.command](a)
  except (BenchError,AssertionError,OSError,ValueError,KeyError) as exc:print('ERROR:',exc,file=sys.stderr);return 2
  return 0
 if __name__=='__main__':sys.exit(main())

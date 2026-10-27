@@ -211,12 +211,26 @@ def build_official(root, xsai, build, out, cc, keys, execute, pmu=False):
             command.insert(2, artifact('CMakeFiles/nr_ulsim.dir/openair2/PHY_INTERFACE/queue_t.c.o'))
         if output.name in ('nr_ulschsim', 'nr_dlschsim'):
             command.append('-rdynamic')
+            if plugins.exists():
+                lifecycle = out / 'codec_plugin_lifecycle.o'
+                if 'codec_plugin_lifecycle' not in resolved:
+                    execute([cc, *compile_flags(build, target), '-c',
+                             str(root / 'src/codec_plugin_lifecycle.c'), '-o', str(lifecycle)])
+                    resolved['codec_plugin_lifecycle'] = str(lifecycle)
+                command.extend([str(lifecycle), '-Wl,--wrap=init_plugins', '-Wl,--wrap=free_plugins'])
         command.insert(1, '-Wl,--start-group')
         command.append('-Wl,--end-group')
         return [artifact(x) for x in command]
     (out / 'pmu_disabled.h').write_text('static inline void pmu_begin(void){}\nstatic inline void pmu_end(unsigned n){(void)n;}\n')
     gnb_header = (xsai / 'openair1/PHY/defs_gNB.h').read_text()
     for key in keys:
+        if key == 'demapper':
+            # The callback ABI needs local headers, but no OAI simulation main or
+            # static PHY libraries. Preserve the local compiler's ISA settings.
+            execute([cc, *compile_flags(build, 'PHY_NR'), '-D_GNU_SOURCE', '-UNDEBUG',
+                     '-I' + str(root / 'src'), str(root / 'src/random_demapper.c'),
+                     '-o', str(out / NAMES[key]), '-rdynamic', '-ldl', '-lm', '-pthread'])
+            continue
         target = 'nr_dlsim' if key == 'DL' else 'nr_ulsim'
         flag_target = target if key in ('UL', 'DL') else 'PHY_NR'
         flags = ['-D_GNU_SOURCE', '-I' + str(root / 'src'), *compile_flags(build, flag_target)]

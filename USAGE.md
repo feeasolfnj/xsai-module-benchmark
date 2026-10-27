@@ -100,3 +100,8 @@ python3 -m unittest discover -s tests -v
 ```
 
 CI检查启动器逻辑，不能代替K3实测。支持范围取决于XSAI源码/API版本，不承诺任意工作树都无需适配。
+
+## 神经网络解调器新增入口
+
+`python3 bench.py run demapper --threads 1 --library /absolute/path/libdemapper_cpu.so` 测量完整解调插件回调；TensorRT 使用 `--backend tensorrt --engine /absolute/path/model.plan`。
+构建方法、随机输入、CPU/GPU 计时边界和直接运行官方正确性 pytest 的方法见 [DEMAPPER.md](DEMAPPER.md)。

@@ -19,6 +19,7 @@
 | UL | nr_ulschsim | 50 RB、两个码块的整个TB译码 |
 | DL | nr_dlschsim | 50 RB、两个码块的整个编码调用 |
 | neural | test_neural | 24 RB，完整receiver_compute_llr插件回调 |
+| demapper | test_demapper | 默认600 RE、16-QAM，完整demapper_compute_llr插件回调；原生CPU或TensorRT GPU |
 | dft / idft | bench-coop | 单份2048点变换；K3 RVV 可八线程协同，官方配置使用本地串行原实现 |
 
 PUSCH估计、测量、符号处理是提取的原处理区域；不是上游正式发布的独立模块API。构建时链接本地XSAI库。源码/结构体不兼容时必须修改适配，不保证任意XSAI版本都能编译。
@@ -69,6 +70,9 @@ DL使用你本地的LDPC编码库；开发记录中曾使用过的私有自适�
 
 ### 神经网络
 
+**神经网络解调器**使用新增 `demapper` 指标，构建、插件配置、官方正确性测试和实测记录见 [DEMAPPER.md](DEMAPPER.md)。
+`python3 bench.py official-demapper-test --srk /path/sionna-rk --python /path/venv/bin/python` 可直接运行本地官方 pytest；它与性能计时分别报告。
+
 由使用者提供与其XSAI接口兼容的插件和权重，单/八线程应分别提供对应插件。不会替你将单线程插件自动并行化。
 
 ```bash
@@ -101,6 +105,7 @@ DFT/IDFT也有周期统计。`auto` 不可用时继续测时间；`required` 必
 | 测量初始每RB噪声功率 | 1024至2047 |
 | 符号处理解扰符号 | -1或+1 |
 | LLR计算的幅度阈值分量 | 1至2048 |
+| 神经解调器 I/Q；幅度两个分量 | -2048至2047；1至2048 |
 | UL译码输入LLR | -127至127，int16数组 |
 | DL编码payload字节 | 0至255 |
 | DFT/IDFT I/Q分量 | -364至364 |
