@@ -12,6 +12,21 @@ def sha(p):return hashlib.sha256(P(p).read_bytes()).hexdigest()
 def check_neural_log(log,backend):
  if backend=='tensorrt' and re.search(r'failed to deserialize engine|no engine available|execution context unavailable|Error Code\s*:?\s*[1-9]|CUDA error',log,re.I):
   raise BenchError('TensorRT reported an engine/context/inference failure; this timing is invalid. Check run.log and rebuild the engine for this GPU/TensorRT version.')
+def amx_flags(path='/proc/cpuinfo'):
+ try:line=next(x for x in P(path).read_text().splitlines() if x.startswith('flags'))
+ except (OSError,StopIteration):return dict(amx_tile=False,amx_bf16=False)
+ flags=set(line.split(':',1)[-1].split())
+ return dict(amx_tile='amx_tile' in flags,amx_bf16='amx_bf16' in flags)
+def amx_stats(log):
+ rows=[dict(re.findall(r'(\w+)=([^\s]+)',line)) for line in log.splitlines() if line.startswith('[AMX_STATS]')]
+ return rows[-1] if rows else None
+def check_amx_log(log):
+ stats=amx_stats(log)
+ if stats is None:raise BenchError('The plugin did not report [AMX_STATS]; this library is probably not built with SRK_DEMAPPER_AMX')
+ if 'fallback' not in stats:raise BenchError('AMX adapter statistics unavailable on the measuring thread: '+str(stats))
+ if int(stats['calls'])<=0:raise BenchError('AMX adapter reported no calls; invalid timing')
+ if int(stats['fallback']):raise BenchError(f"AMX adapter fell back on {stats['fallback']} of {stats['calls']} calls (mask={stats.get('mask','?')}); this timing is a P0 result, not AMX. The AMX adapter only handles |I/Q| <= 4*magnitude: retry with --demapper-input phys, or check the fallback bits in demapper_amx_adapter.h")
+ return {k:(int(v) if k in ('mode','gate','calls','handled','fallback','mask') else v) for k,v in stats.items()}
 def shell(cmd,cwd):
  q=subprocess.run(cmd,cwd=cwd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
  print(q.stdout,end='');return q
@@ -189,8 +204,14 @@ def run(a):
   args=['-n',str(total) if a.metric=='UL' else '3','-s',str(snr),'-S',str(snr+0.01),'-r',str(a.rb or 50),'-R',str(a.carrier_rb or 106),'-m',str(a.mcs if a.mcs is not None else 14),'-l',str(a.symbols or 13)]
   if a.metric=='DL':args+=['-X','n' if n==0 else ','.join(['-1']*8)]
  elif a.metric in ('neural','demapper'):
-  model=a.engine if a.neural_backend=='tensorrt' else a.weights
-  if not a.library or (not model and (a.metric=='neural' or a.neural_backend=='tensorrt')):raise BenchError('Provide --library and '+('--engine for tensorrt' if a.neural_backend=='tensorrt' else '--weights for native receiver'))
+  if a.amx_mode and a.neural_backend!='amx':raise BenchError('--amx-mode requires --backend amx')
+  if a.neural_backend=='amx':
+   if a.metric!='demapper':raise BenchError('--backend amx supports the demapper metric only')
+   if a.weights or a.engine:raise BenchError('--backend amx takes neither --weights nor --engine; the library carries its own model')
+   if (a.amx_mode or 'amx')=='amx' and not amx_flags()['amx_tile']:raise BenchError('This host does not report amx_tile; every AMX call would fall back to P0. Use --amx-mode bf16_ref for the portable BF16 reference, or run on an AMX host')
+   model=None
+  else:model=a.engine if a.neural_backend=='tensorrt' else a.weights
+  if not a.library or (not model and (a.metric=='neural' or (a.metric=='demapper' and a.neural_backend=='tensorrt'))):raise BenchError('Provide --library and '+('--engine for tensorrt' if a.neural_backend=='tensorrt' else '--weights for native receiver'))
   lib=str(P(a.library).resolve());weights=str(P(model).resolve()) if model else None
   if not P(lib).is_file() or (weights and not P(weights).is_file()):raise BenchError('Plugin or weight file does not exist')
   if weights and ('\n' in weights or '\r' in weights):raise BenchError('Model path cannot contain newlines')
@@ -201,8 +222,11 @@ def run(a):
    env.update(NATIVE_TEST_LIB=lib,OAI_NRX_WEIGHTS=weights,OAI_NRX_OUT_SCALE='4',OAI_NRX_RX_SCALE='1',XSAI_RECEIVER_NATIVE_WEIGHTS=weights,XSAI_RECEIVER_LLR_GAIN='4',XSAI_RECEIVER_H_INTERP='1')
   else:
    env['BENCH_DEMAPPER_LIB']=lib
+   env['BENCH_DEMAPPER_INPUT']=a.demapper_input
    if weights:env.update(OAI_DEMAPPER_WEIGHTS=weights,XSAI_DEMAPPER_WEIGHTS=weights)
    args.append(str(a.re or 600))
+   if a.neural_backend=='amx':
+    env.update(DEMAPPER_CPU_MODE='bf16_ref' if a.amx_mode=='bf16_ref' else 'amx',BENCH_AMX_REQUIRED='1')
  else:
   env.update(COOP_EIGHT='1' if n else '0',BENCH_VERIFY=a.verify,BENCH_ITERATIONS=str(a.iterations),BENCH_BATCHES=str(a.batches));args=[a.metric,str(a.seed)]
  cmd=['taskset','-c',cpus,str(binary),*args]
@@ -230,8 +254,12 @@ def run(a):
    if a.metric=='demapper':
     meta.update(re=a.re or 600,qm=4,timing_scope='full_demapper_compute_llr',
                 verification_scope='repeatability_same_implementation',
+                input_protocol='independent_random_iq_and_magnitude' if a.demapper_input=='independent' else 'phys_admissible_comb_iq_within_4x_magnitude',
                 model_selection='external_engine' if a.neural_backend=='tensorrt' else 'plugin_defined',
-                plugin_env={k:v for k,v in env.items() if k.startswith(('OAI_DEMAPPER_','XSAI_DEMAPPER_'))})
+                plugin_env={k:v for k,v in env.items() if k.startswith(('OAI_DEMAPPER_','XSAI_DEMAPPER_','DEMAPPER_CPU_'))})
+    if a.neural_backend=='amx':
+     meta.update(demapper_backend='amx',amx_mode='bf16_ref' if a.amx_mode=='bf16_ref' else 'amx',cpu_amx=amx_flags())
+     meta['notes'].append('AMX timings are only valid when the adapter reports fallback=0; the harness refuses the run otherwise.')
   save(out/'metadata.json',meta);p=None
   try:
    with (out/'run.log').open('w') as f:
@@ -245,6 +273,7 @@ def run(a):
    if rc:raise BenchError(f'Benchmark failed ({rc}), see {out}/run.log')
    if cycle_mode=='required' and cycles['status']!='available':raise BenchError('Hardware cycles required but unavailable or invalid; see cycles.json')
    if a.metric in ('neural','demapper'):check_neural_log((out/'run.log').read_text(),a.neural_backend)
+   if a.metric=='demapper' and a.neural_backend=='amx':meta['amx_stats']=check_amx_log((out/'run.log').read_text())
    if a.freq:check_frequency(allowed,a.freq)
    raw,parsed=records((out/'run.log').read_text(),warmup)
    if not any(row['record_type'] in ('RESULT','CODING_UL','CODING_DL') for row in parsed):raise BenchError('Missing result records')
@@ -254,6 +283,7 @@ def run(a):
     elif row['record_type']=='CODING_DL':row['verification_scope']='repeatability_same_payload'
    save(out/'results.raw.json',raw);write_csv(out/'results.raw.csv',raw);save(out/'results.json',parsed);write_csv(out/'results.csv',parsed)
    report=summary(parsed);report['hardware_cycles']=cycles
+   if 'amx_stats' in meta:report['amx_stats']=meta['amx_stats']
    if a.metric=='UL':
     report['decoder_quality']=decoder_quality(parsed)
     meta['decoder_quality']=report['decoder_quality']
@@ -293,9 +323,10 @@ def make_parser():
  for name in ('doctor','build'):
   b=sp.add_parser(name);b.add_argument('--xsai','--srk','--source',dest='xsai',required=True);b.add_argument('--build');b.add_argument('--cc');b.add_argument('--profile',choices=['auto','xsai','official'],default='auto')
   if name=='build':b.add_argument('--only',default='all');b.add_argument('--pmu',action='store_true',help='Require hardware cycles by default at run time (otherwise auto-detect)')
- r=sp.add_parser('run');r.add_argument('metric',choices=NAMES);r.add_argument('--threads',type=int,choices=[1,8],required=True);r.add_argument('--cpus');r.add_argument('--freq',type=int);r.add_argument('--seed',type=int,default=20261022);r.add_argument('--seconds',type=float);r.add_argument('--library');r.add_argument('--weights');r.add_argument('--engine');r.add_argument('--neural-backend','--backend',dest='neural_backend',choices=['native','tensorrt'],default='native');r.add_argument('--launcher');r.add_argument('--out');r.add_argument('--print-command',action='store_true');r.add_argument('--wait-lock',action='store_true')
+ r=sp.add_parser('run');r.add_argument('metric',choices=NAMES);r.add_argument('--threads',type=int,choices=[1,8],required=True);r.add_argument('--cpus');r.add_argument('--freq',type=int);r.add_argument('--seed',type=int,default=20261022);r.add_argument('--seconds',type=float);r.add_argument('--library');r.add_argument('--weights');r.add_argument('--engine');r.add_argument('--neural-backend','--backend',dest='neural_backend',choices=['native','tensorrt','amx'],default='native');r.add_argument('--launcher');r.add_argument('--out');r.add_argument('--print-command',action='store_true');r.add_argument('--wait-lock',action='store_true')
+ r.add_argument('--amx-mode',choices=['amx','bf16_ref'],help='AMX adapter mode for --backend amx: amx needs amx_tile on this host, bf16_ref is the portable BF16 reference')
  r.add_argument('--cycles',choices=['auto','off','required'],help='Auto-detect hardware CPU cycles (default); off avoids PMU collection; required fails if unavailable')
- r.add_argument('--re',type=int,help='Demapper input RE count (default 600, 16-QAM only)')
+ r.add_argument('--re',type=int,help='Demapper input RE count (default 600, 16-QAM only)');r.add_argument('--demapper-input',choices=['independent','phys'],default='independent',help='Demapper input protocol: independent random I/Q and magnitudes (default), or phys for |I/Q| <= 4*magnitude as the AMX adapter requires')
  for opt in ('warmup','rb','carrier-rb','mcs','symbols','trials'):r.add_argument('--'+opt,type=int)
  r.add_argument('--snr',type=float);r.add_argument('--input-bank',type=int,default=1);r.add_argument('--iterations',type=int,default=10000);r.add_argument('--batches',type=int,default=7)
  r.add_argument('--verify',choices=['strict','report','skip'],default='strict');r.add_argument('--skip-verify',dest='verify',action='store_const',const='skip')

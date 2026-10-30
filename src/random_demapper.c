@@ -7,6 +7,8 @@
 #include "pmu_cycles.h"
 #include <dlfcn.h>
 #include <limits.h>
+#include <math.h>
+#include <string.h>
 #include <time.h>
 
 /* Some OAI plugins resolve their fatal-error hook from the main executable. */
@@ -39,6 +41,12 @@ static void *allocate(size_t bytes)
   memset(p, 0, bytes); return p;
 }
 typedef struct { int32_t *rx; c16_t *mag; int16_t *storage, *out, *reference; } input_t;
+/* Optional AMX adapter counters. The plugin's dmx_adapter_stats begins with the
+ * uint64_t counters calls, handled, fallback; only that prefix is read here so
+ * this harness never includes the plugin's private AMX header. A layout change
+ * shows up as calls==0 or fallback>calls, both rejected by bench.py. */
+#define AMX_STATS_WORDS 8
+typedef int (amx_statsfunc_t)(uint64_t *, int *, int *);
 static void check_guards(input_t *in, unsigned re)
 {
   for (int i = 0; i < 32; i++)
@@ -57,6 +65,9 @@ int main(int argc, char **argv)
   unsigned re = strtoul(argv[3], NULL, 0);
   int bank = getenv("BENCH_INPUT_BANK") ? atoi(getenv("BENCH_INPUT_BANK")) : 1;
   int warmup = getenv("BENCH_WARMUP") ? atoi(getenv("BENCH_WARMUP")) : 100;
+  const char *protocol = getenv("BENCH_DEMAPPER_INPUT") ? getenv("BENCH_DEMAPPER_INPUT") : "independent";
+  int phys = !strcmp(protocol, "phys");
+  if (!phys && strcmp(protocol, "independent")) fail("BENCH_DEMAPPER_INPUT must be independent or phys");
   const char *library = getenv("BENCH_DEMAPPER_LIB");
   if (!library || seconds <= 0 || re < 1 || re > 32768 || bank < 1 || bank > 16 || warmup < 0)
     fail("invalid parameters");
@@ -67,6 +78,10 @@ int main(int argc, char **argv)
   demapper_shutdownfunc_t *shutdown = (demapper_shutdownfunc_t *)dlsym(handle, "demapper_shutdown");
   demapper_compute_llrfunc_t *fn = (demapper_compute_llrfunc_t *)dlsym(handle, "demapper_compute_llr");
   if (!init || !shutdown || !fn) fail("missing required demapper plugin symbols");
+  amx_statsfunc_t *stats = (amx_statsfunc_t *)dlsym(handle, "demapper_cpu_amx_thread_stats");
+  int require_amx = getenv("BENCH_AMX_REQUIRED") != NULL;
+  if (require_amx && !stats)
+    fail("BENCH_AMX_REQUIRED is set but the plugin does not export demapper_cpu_amx_thread_stats; rebuild it with SRK_DEMAPPER_AMX=ON");
   if (init() != 0 || (thread_init && thread_init() != 0)) fail("plugin initialization failed");
   input_t in[16] = {0};
   uint64_t input_hash = UINT64_C(1469598103934665603), output_hash = input_hash;
@@ -77,10 +92,25 @@ int main(int argc, char **argv)
     in[k].storage = allocate((4 * re + 64) * sizeof(int16_t));
     in[k].out = in[k].storage + 32;
     in[k].reference = allocate(4 * re * sizeof(int16_t));
-    for (unsigned i = 0; i < 2 * re; i++) {
-      ((int16_t *)in[k].rx)[i] = (int16_t)((int)(rng(&state) & 4095) - 2048);
-      ((int16_t *)in[k].mag)[i] = (int16_t)(1 + (rng(&state) & 2047));
-    }
+    if (phys)
+      /* Physically admissible comb output: I/Q stays within +-4 magnitudes, the
+       * domain the AMX adapter can prove safe. Independent random I/Q and
+       * magnitudes are still used everywhere else, so the two protocols are not
+       * interchangeable and are recorded separately. */
+      for (unsigned i = 0; i < re; i++) {
+        int mr = 1 + (int)(rng(&state) & 2047), mi = 1 + (int)(rng(&state) & 2047);
+        float ur = (float)((int)(rng(&state) % 8193) - 4096) / 1024.0f;
+        float ui = (float)((int)(rng(&state) % 8193) - 4096) / 1024.0f;
+        ((int16_t *)in[k].rx)[2 * i] = (int16_t)lrintf(ur * (float)mr);
+        ((int16_t *)in[k].rx)[2 * i + 1] = (int16_t)lrintf(ui * (float)mi);
+        ((int16_t *)in[k].mag)[2 * i] = (int16_t)mr;
+        ((int16_t *)in[k].mag)[2 * i + 1] = (int16_t)mi;
+      }
+    else
+      for (unsigned i = 0; i < 2 * re; i++) {
+        ((int16_t *)in[k].rx)[i] = (int16_t)((int)(rng(&state) & 4095) - 2048);
+        ((int16_t *)in[k].mag)[i] = (int16_t)(1 + (rng(&state) & 2047));
+      }
     for (int i = 0; i < 32; i++) in[k].storage[i] = in[k].out[4 * re + i] = 12345;
     input_hash = digest(input_hash, in[k].rx, re * sizeof(int32_t));
     input_hash = digest(input_hash, in[k].mag, re * sizeof(c16_t));
@@ -91,8 +121,8 @@ int main(int argc, char **argv)
     memcpy(in[k].reference, in[k].out, 4 * re * sizeof(int16_t));
   }
   for (int i = 0; i < warmup; i++) compute(fn, &in[i % bank], re);
-  printf("[RANDOM_INPUT] seed=%u source=xorshift32 iq_min=-2048 iq_max=2047 mag_min=1 mag_max=2048 re=%u qm=4 input_bank=%d input_hash=%llu file_reads=0\n",
-         seed, re, bank, (unsigned long long)input_hash);
+  printf("[RANDOM_INPUT] seed=%u source=xorshift32 protocol=%s iq_min=%d iq_max=%d mag_min=1 mag_max=2048 re=%u qm=4 input_bank=%d input_hash=%llu file_reads=0\n",
+         seed, protocol, phys ? -8192 : -2048, phys ? 8192 : 2047, re, bank, (unsigned long long)input_hash);
   unsigned calls = 0;
   double elapsed = 0, begin = now(CLOCK_MONOTONIC_RAW), cpu0 = now(CLOCK_PROCESS_CPUTIME_ID);
   do {
@@ -106,6 +136,17 @@ int main(int argc, char **argv)
     if (memcmp(in[k].out, in[k].reference, 4 * re * sizeof(int16_t))) fail("output changed for identical input");
     output_hash = digest(output_hash, in[k].out, 4 * re * sizeof(int16_t));
   }
+  if (stats) {
+    uint64_t counters[AMX_STATS_WORDS] = {0};
+    int gate = -1, mode = -1;
+    if (stats(counters, &gate, &mode))
+      printf("[AMX_STATS] source=demapper_cpu_amx_thread_stats mode=%d gate=%d calls=%llu handled=%llu fallback=%llu mask=%llu\n",
+             mode, gate, (unsigned long long)counters[0], (unsigned long long)counters[1],
+             (unsigned long long)counters[2], (unsigned long long)counters[6]);
+    else if (require_amx) fail("AMX adapter statistics are unavailable on the measuring thread");
+    else printf("[AMX_STATS] unavailable reason=no_thread_context\n");
+  }
+  else if (!require_amx) printf("[AMX_STATS] unavailable reason=no_symbol\n");
   if (shutdown() != 0) fail("plugin shutdown failed");
   printf("[RESULT] calls=%u mean_us=%.9f cores=%.9f re=%u qm=4 handled=1 verification=passed verification_scope=repeatability_same_implementation input_bank=%d input_hash=%llu output_hash=%llu\n",
          calls, elapsed * 1e6 / calls, cpu / window, re, bank,

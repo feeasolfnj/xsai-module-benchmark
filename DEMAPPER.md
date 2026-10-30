@@ -58,6 +58,88 @@ XSAI_DEMAPPER_LLR_SCALE=32 /absolute/path/run_on_a100 \
   --weights /absolute/path/demapper_a100.weights
 ```
 
+## AMX-BF16 后端（x86-64）
+
+AMX 移植**不是新的插件 ABI**：它是官方 `demapper_cpu` 的编译开关加运行时模式，产出仍是导出
+`demapper_init` / `demapper_init_thread` / `demapper_shutdown` / `demapper_compute_llr` 的同一个
+`libdemapper_cpu.so`。构建开关来自 SRK 工程本身：
+
+```bash
+# 在 SRK 的 CMake 配置阶段打开，默认 OFF；只给 kernel 那一个 TU 加 -mamx-tile -mamx-bf16
+cmake -DSRK_DEMAPPER_AMX=ON ...
+# 成功后仍是 libdemapper_cpu.so，编译定义 SRK_DEMAPPER_AMX_ENABLED=1
+```
+
+运行时模式由插件读取 `DEMAPPER_CPU_MODE`（`p0|amx|bf16_ref`），本仓库用 `--backend amx` 注入，
+不需要手写环境变量：
+
+```bash
+# 真 AMX：主机必须报告 amx_tile，否则本仓库直接拒绝运行
+python3 bench.py run demapper --threads 1 --cpus 0 --backend amx --demapper-input phys \
+  --library /absolute/path/libdemapper_cpu.so --re 600 --seconds 2 --warmup 100
+
+# 可移植的同精度 BF16 参考路径（不要求 AMX 硬件），只用于诊断，不代表 AMX 性能
+python3 bench.py run demapper --threads 1 --cpus 0 --backend amx --amx-mode bf16_ref \
+  --library /absolute/path/libdemapper_cpu.so --re 600 --seconds 2
+```
+
+`--backend amx` 不接受 `--weights` / `--engine`：模型参数编译在插件内；也不需要 TensorRT。
+注入的 `DEMAPPER_CPU_MODE` 与 `DEMAPPER_CPU_RESCALE` 会写入 `metadata.json` 的 `plugin_env`。
+
+### 输入协议：AMX 只接受物理可解调的 comb 输出
+
+适配层把 `rxdataF_comp / ul_ch_mag` 归一化后要求 `|I/Q| <= 4 × 幅度` 且幅度大于 0，否则整调用回落。
+本仓库默认的 `--demapper-input independent` 让 I/Q 与幅度**各自独立**均匀随机（I/Q ±2048、幅度 1..2048），
+比值必然大量超过 4 倍，用于 AMX 会 100% 回落。因此：
+
+- `--demapper-input phys`：按 RE 生成幅度后再按 `|u|<=4` 生成 I/Q，保证落在适配层的可证明范围内；
+  实测的 `iq_min/iq_max` 与 `protocol` 会写进 `run.log` 和 `metadata.json` 的 `input_protocol`。
+- 两种协议**不可互换**：`input_hash` 不同，历史 `independent` 数据不能与 `phys` 数据同列比较。
+- 回落时报错会直接给出 `mask` 与这条提示，不会静默产出"AMX 耗时"。
+
+### 回落是静默的，所以必须有证据
+
+适配层在任何"不能证明安全"的情形（无 AMX 权限、RE 超过适配层容量、输入超出范围、FP 环境不符）
+整调用回落到原 P0 路径，而**插件对外仍返回 1**。仅凭"跑通"或耗时数字无法区分 AMX 与 P0。因此：
+
+- 测试夹具通过可选符号 `demapper_cpu_amx_thread_stats` 读取适配层计数，输出一行
+  `[AMX_STATS] mode=.. gate=.. calls=.. handled=.. fallback=..`；普通（非 AMX）插件没有该符号时行为不变。
+- `--backend amx` 会设置 `BENCH_AMX_REQUIRED=1`：符号缺失、统计不可用、`calls<=0` 或
+  **`fallback>0` 都直接判失败**，不产出"AMX 耗时"。`gate != 0` 说明 CPUID/XCOMP 门未通过，同样属于回落。
+- 结果目录的 `summary.json` 与 `metadata.json` 会带 `amx_stats` 与 `cpu_amx`（是否报告 `amx_tile`/`amx_bf16`）。
+
+因此这套数字**只对"fallback=0 且 run 成功"的结果成立**。它与 P0、TensorRT 的数字不能混在同一列比较：
+中间层是 BF16，数值与 P0 不同；`verification_scope` 仍是重复一致性，不证明 BER/BLER 或数学正确性。
+`cores` 与硬件周期来自 CPU 侧，不含 GPU。
+
+## 2026-10-30 Emerald Rapids 验证
+
+共享服务器 WSL2（Ubuntu 24.04.5），Intel Xeon Gold 6530（Emerald Rapids），128 个逻辑 CPU，
+`/proc/cpuinfo` 报告 `amx_tile`、`amx_bf16` 与 `avx512f`；插件为同机 CMake 以 `-DSRK_DEMAPPER_AMX=ON`
+构建的 `libdemapper_cpu.so`（SHA256 `81037e7f…68df37f`），未重新编译推理模型。
+单核 `--cpus 0`、600 RE、16-QAM、seed=20261022、预热 100、测量窗口 3 s、`--demapper-input phys`。
+
+| 轮次 | μs/回调 | 硬件周期/回调 | 平均 CPU 用核量 |
+|---|---:|---:|---:|
+| 1 | 119.610 | 288041 | 0.9999 |
+| 2 | 118.737 | 287816 | 0.9998 |
+
+两轮 `mode=1`（amx）、`gate=0`、`fallback=0`、`handled == calls`（25024 / 25184），
+`mask=0`；正式调用全部返回已处理，重复一致性与缓冲区边界检查通过；PMU 全程可用
+（`enabled_ns == running_ns`，无复用）。
+
+两条必须先记住的实测事实：
+
+- 用默认的 `--demapper-input independent` 跑同一插件，`gate=0` 但 **57381/57381 次全部回落**
+  （`mask` 指向幅度/范围守卫），耗时约 52 μs，接近 P0 路径。此时的数字不是 AMX 结果，
+  本仓库会直接判失败而不是产出数据。**`|I/Q| <= 4×幅度` 是硬前提。**
+- 本机 AMX 路径约 119 μs，比上述 P0 旁证慢约 2.3 倍。该 P0 数字来自一次被判定无效的运行，
+  输入协议也不同，只能当作方向性提示，**不能作为基线**；要基线需按 `--demapper-input phys`
+  另跑一组 P0。原因未做剖析（⚠️ 推断：600 RE 下逐 RE 的 tile 装载/写回与分块开销占主导）。
+
+这验证了新入口的实际运行、回落拦截与硬件周期采集，不等于 AMX 相对 P0 的收益结论，
+也不等于独立参考正确性 / BER 测试。
+
 ## 输入、计时与校验
 
 - `xorshift32` 生成器，默认 seed=20261022；I/Q 为 [-2048,2047]，幅度两个分量各为 [1,2048]，避免零除。I/Q 和幅度分别随机生成，不构成物理一致的链路。

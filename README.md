@@ -19,7 +19,7 @@
 | UL | nr_ulschsim | 50 RB、两个码块的整个TB译码 |
 | DL | nr_dlschsim | 50 RB、两个码块的整个编码调用 |
 | neural | test_neural | 24 RB，完整receiver_compute_llr插件回调 |
-| demapper | test_demapper | 默认600 RE、16-QAM，完整demapper_compute_llr插件回调；原生CPU或TensorRT GPU |
+| demapper | test_demapper | 默认600 RE、16-QAM，完整demapper_compute_llr插件回调；原生CPU、AMX-BF16（x86-64）或TensorRT GPU |
 | dft / idft | bench-coop | 单份2048点变换；K3 RVV 可八线程协同，官方配置使用本地串行原实现 |
 
 PUSCH估计、测量、符号处理是提取的原处理区域；不是上游正式发布的独立模块API。构建时链接本地XSAI库。源码/结构体不兼容时必须修改适配，不保证任意XSAI版本都能编译。
@@ -111,6 +111,8 @@ DFT/IDFT也有周期统计。`auto` 不可用时继续测时间；`required` 必
 | DFT/IDFT I/Q分量 | -364至364 |
 
 输入生成、配置、分配、状态恢复、校验在计时外。默认种子20261022，可设置 `--seed`。UL每进程生成一份随机payload并编码，各trial加入新的噪声；其他测试默认重复固定数组。PUSCH/LLR/neural/demapper/DFT可用 `--input-bank` 轮换2至16组预生成输入。批次中的输入指针/索引切换开销仍计入批次时间。
+
+AMX 后端例外：适配层要求 `|I/Q| <= 4×幅度`，需配合 `--demapper-input phys`；默认的独立随机协议会 100% 回落，详见 [DEMAPPER.md](DEMAPPER.md)。
 
 PUSCH/神经插件的I/Q与信道数组独立生成，不是相互一致的物理信道样本。UL现已改为官方编译码测试风格的合法码字加噪输入：默认20 dB，检查CRC和原始payload，正式成功数、失败数、BLER及译码前BER见 `summary.json` 的 `decoder_quality`。详见 [UL_DECODING.md](UL_DECODING.md)。UL仍含实际的早停、共享中止和数据相关迭代，不能默认单/八线程工作量完全相同。
 
