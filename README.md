@@ -18,7 +18,7 @@
 | llr | test_llr_region | 16-QAM，600 RE的完整LLR计时区域 |
 | UL | nr_ulschsim | 50 RB、两个码块的整个TB译码 |
 | DL | nr_dlschsim | 50 RB、两个码块的整个编码调用 |
-| neural | test_neural | 24 RB，完整receiver_compute_llr插件回调 |
+| neural | test_neural | 24 RB，完整receiver_compute_llr插件回调；原生CPU、官方 TensorRT 或 OpenVINO/BF16 |
 | demapper | test_demapper | 默认600 RE、16-QAM，完整demapper_compute_llr插件回调；原生CPU、AMX-BF16（x86-64）或TensorRT GPU |
 | dft / idft | bench-coop | 单份2048点变换；K3 RVV 可八线程协同，官方配置使用本地串行原实现 |
 

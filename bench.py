@@ -27,6 +27,29 @@ def check_amx_log(log):
  if int(stats['calls'])<=0:raise BenchError('AMX adapter reported no calls; invalid timing')
  if int(stats['fallback']):raise BenchError(f"AMX adapter fell back on {stats['fallback']} of {stats['calls']} calls (mask={stats.get('mask','?')}); this timing is a P0 result, not AMX. The AMX adapter only handles |I/Q| <= 4*magnitude: retry with --demapper-input phys, or check the fallback bits in demapper_amx_adapter.h")
  return {k:(int(v) if k in ('mode','gate','calls','handled','fallback','mask') else v) for k,v in stats.items()}
+def ov_json(log,prefix):
+ row=next((line for line in log.splitlines() if line.startswith(prefix)),None)
+ if row is None:raise BenchError(f'The plugin did not print {prefix.strip()}; this library is not the OpenVINO/BF16 candidate')
+ text=row[len(prefix):].strip()
+ try:value=json.loads(text)
+ except ValueError:raise BenchError(f'Unparseable {prefix.strip()} record: {text[:200]}') from None
+ if not isinstance(value,dict):raise BenchError(f'Unexpected {prefix.strip()} record')
+ return value
+def check_ov_log(log,model,topology):
+ if 'NRX worker property readback failed or C policy mismatch' in log:
+  raise BenchError('The OV plugin rejected its own worker property readback (C policy mismatch); this timing is invalid')
+ echo=re.search(r'CPU OV receiver: model = (\S+)',log)
+ if not echo:raise BenchError('The OV plugin did not echo the loaded model; cannot prove which model was timed')
+ if P(echo.group(1)).resolve()!=P(model).resolve():raise BenchError(f'Loaded model {echo.group(1)} differs from --ov-model {model}')
+ if f'CPU OV receiver: topology {topology} ' not in log:raise BenchError(f'The OV plugin did not confirm topology {topology}')
+ props=ov_json(log,'NRX_OV_PROPS ')
+ if props.get('inferencePrecision')!='bf16':
+  raise BenchError(f"OpenVINO reported inferencePrecision={props.get('inferencePrecision')}, not bf16; this run is not the BF16 hint path the AMX port is meant to measure")
+ workers=[json.loads(line[line.find('{'):]) for line in log.splitlines() if line.startswith('NRX_WORKER_PROPS ') and line.find('{')>0]
+ if not workers:raise BenchError('No NRX_WORKER_PROPS record; the per-worker property readback is missing')
+ if any(w.get('CPolicyMatches')!=1 for w in workers):raise BenchError('A worker reported CPolicyMatches!=1; the topology policy did not hold')
+ return dict(props=props,workers=len(workers),amx_proven=bool(workers[0].get('amxProven')),
+             worker=dict(topology=workers[0].get('topology'),inferenceNumThreads=workers[0].get('inferenceNumThreads'),numStreams=workers[0].get('numStreams'),inferencePrecision=workers[0].get('inferencePrecision')))
 def shell(cmd,cwd):
  q=subprocess.run(cmd,cwd=cwd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
  print(q.stdout,end='');return q
@@ -205,21 +228,32 @@ def run(a):
   if a.metric=='DL':args+=['-X','n' if n==0 else ','.join(['-1']*8)]
  elif a.metric in ('neural','demapper'):
   if a.amx_mode and a.neural_backend!='amx':raise BenchError('--amx-mode requires --backend amx')
-  if a.neural_backend=='amx':
+  if a.ov_topology and a.neural_backend!='ov':raise BenchError('--ov-topology requires --backend ov')
+  if a.neural_backend=='ov':
+   if a.metric!='neural':raise BenchError('--backend ov supports the neural metric only')
+   if a.weights or a.engine:raise BenchError('--backend ov takes neither --weights nor --engine; the ONNX model goes to --ov-model')
+   if not a.ov_model:raise BenchError('Provide --ov-model for --backend ov')
+   model=None
+  elif a.neural_backend=='amx':
    if a.metric!='demapper':raise BenchError('--backend amx supports the demapper metric only')
    if a.weights or a.engine:raise BenchError('--backend amx takes neither --weights nor --engine; the library carries its own model')
    if (a.amx_mode or 'amx')=='amx' and not amx_flags()['amx_tile']:raise BenchError('This host does not report amx_tile; every AMX call would fall back to P0. Use --amx-mode bf16_ref for the portable BF16 reference, or run on an AMX host')
    model=None
   else:model=a.engine if a.neural_backend=='tensorrt' else a.weights
-  if not a.library or (not model and (a.metric=='neural' or (a.metric=='demapper' and a.neural_backend=='tensorrt'))):raise BenchError('Provide --library and '+('--engine for tensorrt' if a.neural_backend=='tensorrt' else '--weights for native receiver'))
+  if not a.library or (not model and a.neural_backend!='ov' and (a.metric=='neural' or (a.metric=='demapper' and a.neural_backend=='tensorrt'))):raise BenchError('Provide --library and '+('--engine for tensorrt' if a.neural_backend=='tensorrt' else '--weights for native receiver'))
   lib=str(P(a.library).resolve());weights=str(P(model).resolve()) if model else None
-  if not P(lib).is_file() or (weights and not P(weights).is_file()):raise BenchError('Plugin or weight file does not exist')
-  if weights and ('\n' in weights or '\r' in weights):raise BenchError('Model path cannot contain newlines')
+  ov_model=str(P(a.ov_model).resolve()) if a.neural_backend=='ov' else None
+  if not P(lib).is_file() or (weights and not P(weights).is_file()) or (ov_model and not P(ov_model).is_file()):raise BenchError('Plugin, weight or OV model file does not exist')
+  if (weights and ('\n' in weights or '\r' in weights)) or (ov_model and ('\n' in ov_model or '\r' in ov_model)):raise BenchError('Model path cannot contain newlines')
   if a.metric=='demapper' and a.neural_backend=='tensorrt' and env.get('PLAN_POSTFIX'):raise BenchError('Unset PLAN_POSTFIX and pass the exact demapper --engine path, so its hash matches the loaded engine')
   check_library_arch(lib,host_arch())
   args=[str(a.seed),str(a.seconds or 1.5)]
   if a.metric=='neural':
-   env.update(NATIVE_TEST_LIB=lib,OAI_NRX_WEIGHTS=weights,OAI_NRX_OUT_SCALE='4',OAI_NRX_RX_SCALE='1',XSAI_RECEIVER_NATIVE_WEIGHTS=weights,XSAI_RECEIVER_LLR_GAIN='4',XSAI_RECEIVER_H_INTERP='1')
+   env['NATIVE_TEST_LIB']=lib
+   if a.neural_backend=='ov':
+    if a.ov_topology:env['NRX_OV_TOPOLOGY']=a.ov_topology
+   else:
+    env.update(OAI_NRX_WEIGHTS=weights,OAI_NRX_OUT_SCALE='4',OAI_NRX_RX_SCALE='1',XSAI_RECEIVER_NATIVE_WEIGHTS=weights,XSAI_RECEIVER_LLR_GAIN='4',XSAI_RECEIVER_H_INTERP='1')
   else:
    env['BENCH_DEMAPPER_LIB']=lib
    env['BENCH_DEMAPPER_INPUT']=a.demapper_input
@@ -239,12 +273,21 @@ def run(a):
   out=P(a.out).resolve() if a.out else ROOT/'results'/(datetime.datetime.now().strftime('%Y%m%d-%H%M%S')+'-'+a.metric+'-'+uuid.uuid4().hex[:6]);out.mkdir(parents=True,exist_ok=False)
   meta=dict(status='running',metric=a.metric,threads_requested=a.threads,workers_configured=n,cpus=cpus,seed=a.seed,config=c,argv=cmd,env=changes,notes=notes,frequency_before=before,pmu=c.get('metric_pmu',{}).get(a.metric,False),kernel=subprocess.check_output(['uname','-a'],text=True).strip(),libdfts_sha256=sha(b/'libdfts.so'),warmup_calls=warmup,input_bank=a.input_bank,cache_protocol='fixed-input warm-cache steady state' if a.input_bank==1 else 'cycling pregenerated bank; not guaranteed cold-cache')
   meta.update(cycles_mode=cycle_mode)
+  if os.environ.get('LD_PRELOAD'):
+   meta['ld_preload']=os.environ['LD_PRELOAD']
+   meta['notes'].append('LD_PRELOAD was set for this run; preloaded objects can instrument or replace the measured code path.')
   if a.metric=='UL':meta.update(decoder_input='encoded_bpsk_awgn',snr_db=snr,quantization_bits=8,
                               payload_protocol='one_seeded_random_payload_encoded_once_fresh_awgn_each_trial',
                               timing_scope='nr_ulsch_decoding_full_tb_excluding_input_generation_and_encoding')
   if a.metric in ('neural','demapper'):
    meta.update(plugin_sha256=sha(a.library),model_sha256=sha(weights) if weights else None,neural_backend=a.neural_backend)
    if weights:meta['engine_sha256' if a.neural_backend=='tensorrt' else 'weights_sha256']=sha(weights)
+   if a.neural_backend=='ov':
+    meta.update(ov_model=ov_model,ov_model_sha256=sha(ov_model),ov_topology=a.ov_topology or 'L')
+    meta['notes'].append('OV_BF16_HINT is an execution hint and the plugin records amxProven=false: this is not per-operator AMX evidence.')
+    cfg=out/'plugins/neural_receiver/config';cfg.mkdir(parents=True)
+    (cfg/'receiver_cpu.config').write_text(ov_model+'\n')
+    meta['notes'].append('The model path goes through receiver_cpu.config because the plugin echoes that file; NRX_OV_MODEL is left unset so the echo proves what was timed.')
    if a.neural_backend=='tensorrt':
     plugin='neural_receiver' if a.metric=='neural' else 'neural_demapper'
     filename='receiver_trt.config' if a.metric=='neural' else 'demapper_trt.config'
@@ -274,6 +317,7 @@ def run(a):
    if cycle_mode=='required' and cycles['status']!='available':raise BenchError('Hardware cycles required but unavailable or invalid; see cycles.json')
    if a.metric in ('neural','demapper'):check_neural_log((out/'run.log').read_text(),a.neural_backend)
    if a.metric=='demapper' and a.neural_backend=='amx':meta['amx_stats']=check_amx_log((out/'run.log').read_text())
+   if a.neural_backend=='ov':meta['ov_props']=check_ov_log((out/'run.log').read_text(),ov_model,a.ov_topology or 'L')
    if a.freq:check_frequency(allowed,a.freq)
    raw,parsed=records((out/'run.log').read_text(),warmup)
    if not any(row['record_type'] in ('RESULT','CODING_UL','CODING_DL') for row in parsed):raise BenchError('Missing result records')
@@ -283,7 +327,8 @@ def run(a):
     elif row['record_type']=='CODING_DL':row['verification_scope']='repeatability_same_payload'
    save(out/'results.raw.json',raw);write_csv(out/'results.raw.csv',raw);save(out/'results.json',parsed);write_csv(out/'results.csv',parsed)
    report=summary(parsed);report['hardware_cycles']=cycles
-   if 'amx_stats' in meta:report['amx_stats']=meta['amx_stats']
+   for key in ('amx_stats','ov_props'):
+    if key in meta:report[key]=meta[key]
    if a.metric=='UL':
     report['decoder_quality']=decoder_quality(parsed)
     meta['decoder_quality']=report['decoder_quality']
@@ -323,7 +368,9 @@ def make_parser():
  for name in ('doctor','build'):
   b=sp.add_parser(name);b.add_argument('--xsai','--srk','--source',dest='xsai',required=True);b.add_argument('--build');b.add_argument('--cc');b.add_argument('--profile',choices=['auto','xsai','official'],default='auto')
   if name=='build':b.add_argument('--only',default='all');b.add_argument('--pmu',action='store_true',help='Require hardware cycles by default at run time (otherwise auto-detect)')
- r=sp.add_parser('run');r.add_argument('metric',choices=NAMES);r.add_argument('--threads',type=int,choices=[1,8],required=True);r.add_argument('--cpus');r.add_argument('--freq',type=int);r.add_argument('--seed',type=int,default=20261022);r.add_argument('--seconds',type=float);r.add_argument('--library');r.add_argument('--weights');r.add_argument('--engine');r.add_argument('--neural-backend','--backend',dest='neural_backend',choices=['native','tensorrt','amx'],default='native');r.add_argument('--launcher');r.add_argument('--out');r.add_argument('--print-command',action='store_true');r.add_argument('--wait-lock',action='store_true')
+ r=sp.add_parser('run');r.add_argument('metric',choices=NAMES);r.add_argument('--threads',type=int,choices=[1,8],required=True);r.add_argument('--cpus');r.add_argument('--freq',type=int);r.add_argument('--seed',type=int,default=20261022);r.add_argument('--seconds',type=float);r.add_argument('--library');r.add_argument('--weights');r.add_argument('--engine');r.add_argument('--neural-backend','--backend',dest='neural_backend',choices=['native','tensorrt','amx','ov'],default='native');r.add_argument('--launcher');r.add_argument('--out');r.add_argument('--print-command',action='store_true');r.add_argument('--wait-lock',action='store_true')
+ r.add_argument('--ov-model',help='ONNX model for --backend ov; passed as NRX_OV_MODEL')
+ r.add_argument('--ov-topology',choices=['L','C'],help='OpenVINO receiver topology for --backend ov: L shared CompiledModel (plugin default) or C per-worker')
  r.add_argument('--amx-mode',choices=['amx','bf16_ref'],help='AMX adapter mode for --backend amx: amx needs amx_tile on this host, bf16_ref is the portable BF16 reference')
  r.add_argument('--cycles',choices=['auto','off','required'],help='Auto-detect hardware CPU cycles (default); off avoids PMU collection; required fails if unavailable')
  r.add_argument('--re',type=int,help='Demapper input RE count (default 600, 16-QAM only)');r.add_argument('--demapper-input',choices=['independent','phys'],default='independent',help='Demapper input protocol: independent random I/Q and magnitudes (default), or phys for |I/Q| <= 4*magnitude as the AMX adapter requires')

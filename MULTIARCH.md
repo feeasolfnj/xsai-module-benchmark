@@ -103,6 +103,31 @@ python3 bench.py run neural --threads 1 --neural-backend tensorrt \
 `cores` 来自进程 CPU 时间 / 墙钟时间，**不包括 GPU 利用率**，不能与 K3 的 CPU 用核量直接当作同类加速比比较。
 普通 GitHub 托管 runner 无 NVIDIA GPU；CPU CI 不能证明 TensorRT 推理已在 GPU 上通过。
 
+### 官方 OpenVINO / BF16 CPU 插件（x86-64）
+
+SRK 的 CPU 接收机另有一条 OV 候选实现：同一个 ONNX、同样的前后处理与量化，只把推理调用从 ONNX Runtime
+换成 OpenVINO 2025.4，并以 BF16 精度提示执行。它导出与 CPU 插件相同的 `receiver_*` 符号，本仓库按第三种后端接入：
+
+```bash
+python3 bench.py run neural --threads 1 --cpus 0 --backend ov \
+  --library /absolute/path/ov.so \
+  --ov-model /absolute/path/nrx_oai.onnx \
+  --ov-topology L --seconds 20
+```
+
+- 不接受 `--weights` / `--engine`：模型由 `--ov-model` 写入本次结果目录的
+  `plugins/neural_receiver/config/receiver_cpu.config`，插件读该文件并回显路径，因此"实际计时的模型"
+  可被逐字核对。不设置 `NRX_OV_MODEL`（它会在读配置之后覆盖模型，使回显失去证明力）。
+  `--ov-topology L|C` 选拓扑，L 为进程级共享 CompiledModel，C 为每线程私有；默认跟随插件（L）。
+- 运行后解析插件自报的 `NRX_OV_PROPS` 与每线程 `NRX_WORKER_PROPS`，并要求：回显的模型路径等于 `--ov-model`、
+  拓扑回显一致、`inferencePrecision=bf16`、每个 worker 的 `CPolicyMatches=1`。任一不满足即判失败。
+  `NRX worker property readback failed or C policy mismatch` 直接终止。
+- `OV_BF16_HINT` 只是执行提示，插件自己记录 `amxProven=false`。这些字段只能证明"确实走 OV BF16 路径"，
+  **不是逐算子 AMX 证据**，也不能与 demapper 的 AMX 数字并列。
+- 输入形状固定为 288 RE（24 PRB）×13 符号 ×1 天线 ×1 层；桥接层会把模型 reshape 到该形状，不匹配即抛错。
+  这与本仓库 neural 夹具（24 RB、13 符号、1Rx、1 层）一致，不需要额外改规模。
+- 单次回调量级是毫秒级（历史 P0-L 约 51 ms/次），`--seconds` 窗口下记录条数远少于 PUSCH 类指标，属正常。
+
 ## 输入和结果的解释
 
 随机范围、计时边界、预热剔除、验证范围沿用 [USAGE.md](USAGE.md) 和 [README.md](README.md)。
