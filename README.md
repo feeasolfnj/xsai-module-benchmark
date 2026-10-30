@@ -24,6 +24,20 @@
 
 PUSCH估计、测量、符号处理是提取的原处理区域；不是上游正式发布的独立模块API。构建时链接本地XSAI库。源码/结构体不兼容时必须修改适配，不保证任意XSAI版本都能编译。
 
+### 两个 x86-64 加速后端：AMX 与 OpenVINO
+
+`demapper` 和 `neural` 都能在 x86-64 上用"加速"插件，但两者不是同一件事，数字也不能互相比较：
+
+| 指标 | 后端 | 加速方式 | 可核验的证据 |
+|---|---|---|---|
+| demapper | `--backend amx` | SRK 的 `SRK_DEMAPPER_AMX` 开关产出**手写 AMX-BF16 tile kernel**（`-mamx-tile -mamx-bf16`），运行时由 `DEMAPPER_CPU_MODE` 在 amx / bf16_ref / p0 之间选 | `[AMX_STATS]` 的 `gate=0`、`fallback=0`、`mask=0`；`fallback>0` 直接判失败 |
+| neural | `--backend ov` | **OpenVINO 2025.4 CPU 运行时 + BF16 精度提示**，是否用到 AMX 由 OpenVINO 内部决定 | `NRX_OV_PROPS` 的 `inferencePrecision=bf16`、每个 worker 的 `CPolicyMatches=1`；插件同时记录 `amxProven=false` |
+
+- **`amxProven=false` 是插件自己写的**：OV 的 BF16 提示不等于逐算子用到 AMX，所以 OV 的数字不能标成"AMX 加速"，也不能与 demapper 的 AMX 数字并列。
+- 两者都允许回落到 P0，而回落是静默的（插件对外仍返回成功），因此本仓库只认证据字段，不认"跑通了"。
+- demapper AMX 需配合 `--demapper-input phys`（`|I/Q| <= 4×幅度`），否则 100% 回落；细节见 [DEMAPPER.md](DEMAPPER.md)。
+- OV 的模型入口、拓扑与校验规则见 [MULTIARCH.md](MULTIARCH.md)。
+
 ## 环境和本地工程
 
 - 64位 Linux；K3 RVV 配置要求 VLEN=256bit 和兼容编译器。x86-64 / ARM64 官方配置读取本地 CMake 参数，详见 [MULTIARCH.md](MULTIARCH.md)。需要 Python3.10+、make/CMake 或 Ninja、ar、C++链接器。
