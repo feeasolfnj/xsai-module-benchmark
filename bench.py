@@ -201,7 +201,7 @@ def run(a):
   if value is not None and not lo<=value<=hi:raise BenchError(f'--{name} must be in [{lo}, {hi}]')
  if (a.rb or 50)>(a.carrier_rb or 106):raise BenchError('--rb cannot exceed --carrier-rb')
  if not 0<=a.seed<=4294967295:raise BenchError('--seed must fit uint32')
- if a.ldpc_version and a.metric not in ('UL','DL'):raise BenchError('--ldpc-version applies to the UL/DL coding metrics only')
+ if a.ldpc_version and a.metric!='UL':raise BenchError('--ldpc-version applies to the UL decoding path only: this plugin supplies no separate encoder, so DL would just load the same shared encoder under another name')
  if a.snr is not None and not math.isfinite(a.snr):raise BenchError('--snr must be finite')
  c=config();b=P(c['build'])
  if c.get('architecture',host_arch())!=host_arch():raise BenchError('Build architecture differs from this host; rebuild locally')
@@ -284,7 +284,7 @@ def run(a):
   if a.ldpc_version:
    plugin=b/f'libldpc{a.ldpc_version}.so'
    meta.update(ldpc_version=a.ldpc_version,ldpc_library=str(plugin),ldpc_plugin_sha256=sha(plugin) if plugin.exists() else None)
-   meta['notes'].append('UL/DL timing uses the plugin named by --ldpc-version, not the tree default libldpc.so.')
+   meta['notes'].append('UL decoding uses the plugin named by --ldpc-version, not the tree default libldpc.so. Its encoder is the shared source file, so DL is not a plugin comparison and is refused by this option.')
   if os.environ.get('LD_PRELOAD'):
    meta['ld_preload']=os.environ['LD_PRELOAD']
    meta['notes'].append('LD_PRELOAD was set for this run; preloaded objects can instrument or replace the measured code path.')
@@ -394,7 +394,7 @@ def make_parser():
  for opt in ('warmup','rb','carrier-rb','mcs','symbols','trials'):r.add_argument('--'+opt,type=int)
  for opt in ('dl-dmrs-count','dl-dmrs-groups','dl-tbslbrm'):r.add_argument('--'+opt,type=int)
  r.add_argument('--snr',type=float);r.add_argument('--input-bank',type=int,default=1);r.add_argument('--iterations',type=int,default=10000);r.add_argument('--batches',type=int,default=7)
- r.add_argument('--ldpc-version',help='UL/DL only: load libldpc<version>.so through --loader.ldpc.shlibversion (for example _cpu or _cpu_avx2); a plugin must print its own init banner or the run fails')
+ r.add_argument('--ldpc-version',help='UL only: load libldpc<version>.so through --loader.ldpc.shlibversion (for example _cpu or _cpu_avx2); a plugin must print its own init banner or the run fails')
  r.add_argument('--verify',choices=['strict','report','skip'],default='strict');r.add_argument('--skip-verify',dest='verify',action='store_const',const='skip')
  sw=sp.add_parser('sweep');sw.add_argument('file',help='JSON list of run argument dictionaries')
  official=sp.add_parser('official-demapper-test',help='Run upstream CUDA/TensorRT pytest accuracy tests (requires Sionna environment)')

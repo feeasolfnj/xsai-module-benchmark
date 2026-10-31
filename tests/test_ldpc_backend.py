@@ -12,7 +12,7 @@ class LdpcBackendTests(unittest.TestCase):
     def test_ldpc_version_is_optional_and_carries_the_plugin_suffix(self):
         args = make_parser().parse_args(['run', 'UL', '--threads', '1'])
         self.assertIsNone(args.ldpc_version)
-        args = make_parser().parse_args(['run', 'DL', '--threads', '1', '--ldpc-version', '_cpu_avx2'])
+        args = make_parser().parse_args(['run', 'UL', '--threads', '1', '--ldpc-version', '_cpu_avx2'])
         self.assertEqual(args.ldpc_version, '_cpu_avx2')
 
     def test_allocation_defaults_match_the_rfsim_reference(self):

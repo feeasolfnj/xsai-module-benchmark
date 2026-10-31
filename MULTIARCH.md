@@ -128,35 +128,44 @@ python3 bench.py run neural --threads 1 --cpus 0 --backend ov \
   这与本仓库 neural 夹具（24 RB、13 符号、1Rx、1 层）一致，不需要额外改规模。
 - 单次回调量级是毫秒级（历史 P0-L 约 51 ms/次），`--seconds` 窗口下记录条数远少于 PUSCH 类指标，属正常。
 
-## LDPC 编解码后端（UL/DL）
+## CUDA LDPC 插件（仅 UL 译码）
 
-UL/DL 的编解码实现不在 benchmark 里：被测程序通过
-`load_nrLDPC_coding_interface()` → `dlopen("libldpc<version>.so")` 从源码树动态加载，
-默认拿 `libldpc.so`（树默认实现）。要测插件版（例如 CUDA LDPC 插件的 CPU 实现），
-用 `--ldpc-version` 指定后缀：
+**这个插件的性能只体现在 UL 译码上。** 它没有独立的编码器：`plugins/ldpc_cuda/CMakeLists.txt`
+里的 `LDPC_SHARED_SRC` 把 `ldpc_encoder_optim8segmulti.c`、段编码、速率匹配与树默认库共用，
+只有 decoder core（`src/runtime/ldpc_decoder_cpu.c` / `ldpc_decoder.cu`）是插件自己的实现。
+因此 DL 用 `--ldpc-version` 只是把同一份编码器换个壳加载，测不出任何插件差异，本仓库直接拒绝：
+
+```
+--ldpc-version applies to the UL decoding path only
+```
+
+译码实现不在 benchmark 里：被测程序通过 `load_nrLDPC_coding_interface()` →
+`dlopen("libldpc<version>.so")` 从源码树动态加载，默认拿 `libldpc.so`（树默认解码器）。
 
 ```bash
-# 加载 libldpc_cpu.so（插件），UL 侧 50 PRB / 106 PRB 载波，与 rfsim 对齐
+# 用插件解码器跑 UL（50 RB / 106 RB 载波，与 rfsim 对齐）
 python3 bench.py run UL --threads 1 --cpus 0 --trials 500 \
   --rb 50 --carrier-rb 106 --ldpc-version _cpu
 
-# 同一命令换成 CUDA 版插件（需 ENABLE_CUDA=ON 且本机有可用 GPU）
-python3 bench.py run DL --threads 1 --cpus 0 --ldpc-version _cuda
+# GPU 版解码器需 ENABLE_CUDA=ON 且本机有可用 GPU
+python3 bench.py run UL --threads 1 --cpus 0 --ldpc-version _cuda
 ```
 
 - 库名规则是 `libldpc<version>.so`，**后缀要和文件名严格一致**：文件叫
   `libldpc_cpu_avx2.so` 就必须传 `_cpu_avx2`，传 `_avx2` 会去找 `libldpc_avx2.so` 并报加载失败。
 - 运行后必须出现插件自己的 `Initialized CPU LDPC decoder` 横幅，否则判失败——避免"以为加载了插件、
   实际跑的是树默认库"。
-- `metadata.json` 记录 `ldpc_version`、`ldpc_library`、`ldpc_plugin_sha256`，以及 UL/DL 的
-  `rb`、`carrier_rb`、`mcs`、`symbols`。UL 在 `rb=50 / carrier_rb=106` 时置 `rfsim_matched=true`；
-  改成其他分配会写一条 note，提示不要与 rfsim 结果直接比较。
+- `metadata.json` 记录 `ldpc_version`、`ldpc_library`、`ldpc_plugin_sha256`，以及 UL 的
+  `rb`、`carrier_rb`、`mcs`、`symbols`。`rb=50 / carrier_rb=106` 时置 `rfsim_matched=true`；
+  改成其他分配会写一条 note，提示不要与 rfsim 结果直接比较。DL 的编码配置记录在 `encoding_profile`。
 - **插件必须与宿主静态库同源编译**：宿主二进制链接的是构建目录里的 `libPHY_NR.a` 等，
   而插件是 `dlopen` 的独立模块。两者若基于不同版本的 `nrLDPC_coding_interface.h`（结构体里嵌了
   `time_stats_t` 等），跨边界结构体会错位，表现为插件初始化成功、首次调用即 SIGSEGV。
   遇到这种崩溃先比对 `git log -1 -- <头文件>` 与静态库时间戳，再决定是否需要重建库。
 - 插件带 `PLUGIN_PERF_CYC=1` 时会引用 `oai_perf_cyc_*`；宿主不提供这些符号则加载失败，
   此时需用与宿主一致的口径重编插件，或由宿主补齐符号。
+- 宿主侧还需要 `-DOAI_PERF_CYC_ENABLE=0` 编译：否则库里的 `[PERF_CYC]` 输出会把
+  `[CODING_UL]`/`[CODING_DL]` 记录行从中间切断，逐行解析失效。
 
 ## 输入和结果的解释
 
