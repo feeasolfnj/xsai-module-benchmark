@@ -128,6 +128,36 @@ python3 bench.py run neural --threads 1 --cpus 0 --backend ov \
   这与本仓库 neural 夹具（24 RB、13 符号、1Rx、1 层）一致，不需要额外改规模。
 - 单次回调量级是毫秒级（历史 P0-L 约 51 ms/次），`--seconds` 窗口下记录条数远少于 PUSCH 类指标，属正常。
 
+## LDPC 编解码后端（UL/DL）
+
+UL/DL 的编解码实现不在 benchmark 里：被测程序通过
+`load_nrLDPC_coding_interface()` → `dlopen("libldpc<version>.so")` 从源码树动态加载，
+默认拿 `libldpc.so`（树默认实现）。要测插件版（例如 CUDA LDPC 插件的 CPU 实现），
+用 `--ldpc-version` 指定后缀：
+
+```bash
+# 加载 libldpc_cpu.so（插件），UL 侧 50 PRB / 106 PRB 载波，与 rfsim 对齐
+python3 bench.py run UL --threads 1 --cpus 0 --trials 500 \
+  --rb 50 --carrier-rb 106 --ldpc-version _cpu
+
+# 同一命令换成 CUDA 版插件（需 ENABLE_CUDA=ON 且本机有可用 GPU）
+python3 bench.py run DL --threads 1 --cpus 0 --ldpc-version _cuda
+```
+
+- 库名规则是 `libldpc<version>.so`，**后缀要和文件名严格一致**：文件叫
+  `libldpc_cpu_avx2.so` 就必须传 `_cpu_avx2`，传 `_avx2` 会去找 `libldpc_avx2.so` 并报加载失败。
+- 运行后必须出现插件自己的 `Initialized CPU LDPC decoder` 横幅，否则判失败——避免"以为加载了插件、
+  实际跑的是树默认库"。
+- `metadata.json` 记录 `ldpc_version`、`ldpc_library`、`ldpc_plugin_sha256`，以及 UL/DL 的
+  `rb`、`carrier_rb`、`mcs`、`symbols`。UL 在 `rb=50 / carrier_rb=106` 时置 `rfsim_matched=true`；
+  改成其他分配会写一条 note，提示不要与 rfsim 结果直接比较。
+- **插件必须与宿主静态库同源编译**：宿主二进制链接的是构建目录里的 `libPHY_NR.a` 等，
+  而插件是 `dlopen` 的独立模块。两者若基于不同版本的 `nrLDPC_coding_interface.h`（结构体里嵌了
+  `time_stats_t` 等），跨边界结构体会错位，表现为插件初始化成功、首次调用即 SIGSEGV。
+  遇到这种崩溃先比对 `git log -1 -- <头文件>` 与静态库时间戳，再决定是否需要重建库。
+- 插件带 `PLUGIN_PERF_CYC=1` 时会引用 `oai_perf_cyc_*`；宿主不提供这些符号则加载失败，
+  此时需用与宿主一致的口径重编插件，或由宿主补齐符号。
+
 ## 输入和结果的解释
 
 随机范围、计时边界、预热剔除、验证范围沿用 [USAGE.md](USAGE.md) 和 [README.md](README.md)。

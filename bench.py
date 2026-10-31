@@ -35,6 +35,8 @@ def ov_json(log,prefix):
  except ValueError:raise BenchError(f'Unparseable {prefix.strip()} record: {text[:200]}') from None
  if not isinstance(value,dict):raise BenchError(f'Unexpected {prefix.strip()} record')
  return value
+def check_ldpc_log(log,version):
+ if 'Initialized CPU LDPC decoder' not in log:raise BenchError(f'libldpc{version}.so did not print its init banner; the requested LDPC library was not the one loaded. Check that the file sits in the build directory and that any missing host symbols are provided.')
 def check_ov_log(log,model,topology):
  if 'NRX worker property readback failed or C policy mismatch' in log:
   raise BenchError('The OV plugin rejected its own worker property readback (C policy mismatch); this timing is invalid')
@@ -199,6 +201,7 @@ def run(a):
   if value is not None and not lo<=value<=hi:raise BenchError(f'--{name} must be in [{lo}, {hi}]')
  if (a.rb or 50)>(a.carrier_rb or 106):raise BenchError('--rb cannot exceed --carrier-rb')
  if not 0<=a.seed<=4294967295:raise BenchError('--seed must fit uint32')
+ if a.ldpc_version and a.metric not in ('UL','DL'):raise BenchError('--ldpc-version applies to the UL/DL coding metrics only')
  if a.snr is not None and not math.isfinite(a.snr):raise BenchError('--snr must be finite')
  c=config();b=P(c['build'])
  if c.get('architecture',host_arch())!=host_arch():raise BenchError('Build architecture differs from this host; rebuild locally')
@@ -229,6 +232,7 @@ def run(a):
   if a.metric=='DL':
    env.update(CODING_DL_DMRS_COUNT=str(radio['dmrs_count']),CODING_DL_DMRS_GROUPS=str(radio['dmrs_groups']),CODING_DL_TBSLBRM=str(radio['tbslbrm']))
    args+=['-X','n' if n==0 else ','.join(['-1']*8)]
+  if a.ldpc_version:args+=['--loader.ldpc.shlibversion',a.ldpc_version]
  elif a.metric in ('neural','demapper'):
   if a.amx_mode and a.neural_backend!='amx':raise BenchError('--amx-mode requires --backend amx')
   if a.ov_topology and a.neural_backend!='ov':raise BenchError('--ov-topology requires --backend ov')
@@ -277,9 +281,17 @@ def run(a):
   meta=dict(status='running',metric=a.metric,threads_requested=a.threads,workers_configured=n,cpus=cpus,seed=a.seed,config=c,argv=cmd,env=changes,notes=notes,frequency_before=before,pmu=c.get('metric_pmu',{}).get(a.metric,False),kernel=subprocess.check_output(['uname','-a'],text=True).strip(),libdfts_sha256=sha(b/'libdfts.so'),warmup_calls=warmup,input_bank=a.input_bank,cache_protocol='fixed-input warm-cache steady state' if a.input_bank==1 else 'cycling pregenerated bank; not guaranteed cold-cache')
   meta.update(cycles_mode=cycle_mode)
   if a.metric=='DL':meta['encoding_profile']=dict(rb=a.rb or 50,carrier_rb=a.carrier_rb or 106,**radio)
+  if a.ldpc_version:
+   plugin=b/f'libldpc{a.ldpc_version}.so'
+   meta.update(ldpc_version=a.ldpc_version,ldpc_library=str(plugin),ldpc_plugin_sha256=sha(plugin) if plugin.exists() else None)
+   meta['notes'].append('UL/DL timing uses the plugin named by --ldpc-version, not the tree default libldpc.so.')
   if os.environ.get('LD_PRELOAD'):
    meta['ld_preload']=os.environ['LD_PRELOAD']
    meta['notes'].append('LD_PRELOAD was set for this run; preloaded objects can instrument or replace the measured code path.')
+  if a.metric=='UL':
+   meta.update(rb=a.rb or 50,carrier_rb=a.carrier_rb or 106,mcs=radio['mcs'],symbols=radio['symbols'])
+   meta['rfsim_matched']=(a.rb or 50)==50 and (a.carrier_rb or 106)==106
+   if not meta['rfsim_matched']:meta['notes'].append('UL allocation is '+str(a.rb or 50)+' RB instead of the rfsim reference 50 RB; do not compare directly with rfsim runs.')
   if a.metric=='UL':meta.update(decoder_input='encoded_bpsk_awgn',snr_db=snr,quantization_bits=8,
                               payload_protocol='one_seeded_random_payload_encoded_once_fresh_awgn_each_trial',
                               timing_scope='nr_ulsch_decoding_full_tb_excluding_input_generation_and_encoding')
@@ -322,6 +334,7 @@ def run(a):
    if a.metric in ('neural','demapper'):check_neural_log((out/'run.log').read_text(),a.neural_backend)
    if a.metric=='demapper' and a.neural_backend=='amx':meta['amx_stats']=check_amx_log((out/'run.log').read_text())
    if a.neural_backend=='ov':meta['ov_props']=check_ov_log((out/'run.log').read_text(),ov_model,a.ov_topology or 'L')
+   if a.ldpc_version:check_ldpc_log((out/'run.log').read_text(),a.ldpc_version)
    if a.freq:check_frequency(allowed,a.freq)
    raw,parsed=records((out/'run.log').read_text(),warmup)
    if not any(row['record_type'] in ('RESULT','CODING_UL','CODING_DL') for row in parsed):raise BenchError('Missing result records')
@@ -381,6 +394,7 @@ def make_parser():
  for opt in ('warmup','rb','carrier-rb','mcs','symbols','trials'):r.add_argument('--'+opt,type=int)
  for opt in ('dl-dmrs-count','dl-dmrs-groups','dl-tbslbrm'):r.add_argument('--'+opt,type=int)
  r.add_argument('--snr',type=float);r.add_argument('--input-bank',type=int,default=1);r.add_argument('--iterations',type=int,default=10000);r.add_argument('--batches',type=int,default=7)
+ r.add_argument('--ldpc-version',help='UL/DL only: load libldpc<version>.so through --loader.ldpc.shlibversion (for example _cpu or _cpu_avx2); a plugin must print its own init banner or the run fails')
  r.add_argument('--verify',choices=['strict','report','skip'],default='strict');r.add_argument('--skip-verify',dest='verify',action='store_const',const='skip')
  sw=sp.add_parser('sweep');sw.add_argument('file',help='JSON list of run argument dictionaries')
  official=sp.add_parser('official-demapper-test',help='Run upstream CUDA/TensorRT pytest accuracy tests (requires Sionna environment)')
