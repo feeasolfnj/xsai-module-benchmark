@@ -11,6 +11,26 @@ class BenchError(Exception):
     pass
 
 
+def coding_parameters(metric, mcs=None, symbols=None, dmrs_count=None, dmrs_groups=None, tbslbrm=None):
+    """DL defaults match the measured 50-RB RFsim encoding workload; UL is unchanged."""
+    dl_options = (dmrs_count, dmrs_groups, tbslbrm)
+    if metric != 'DL' and any(v is not None for v in dl_options):
+        raise BenchError('--dl-dmrs-count, --dl-dmrs-groups and --dl-tbslbrm apply only to DL')
+    result = dict(mcs=(9 if metric == 'DL' else 14) if mcs is None else mcs,
+                  symbols=13 if symbols is None else symbols)
+    if metric == 'DL':
+        result.update(dmrs_count=1 if dmrs_count is None else dmrs_count,
+                      dmrs_groups=2 if dmrs_groups is None else dmrs_groups,
+                      tbslbrm=184424 if tbslbrm is None else tbslbrm)
+        if not 1 <= result['dmrs_count'] <= min(4, result['symbols']):
+            raise BenchError('--dl-dmrs-count must be 1..4 and no greater than --symbols')
+        if result['dmrs_groups'] not in (1, 2):
+            raise BenchError('--dl-dmrs-groups must be 1 or 2 (DMRS type 1)')
+        if not 1 <= result['tbslbrm'] <= 2147483647:
+            raise BenchError('--dl-tbslbrm must be a positive int32 value')
+    return result
+
+
 def cpu_list(value):
     result = set()
     try:

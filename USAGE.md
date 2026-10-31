@@ -29,6 +29,10 @@ python3 bench.py run llr --threads 1 --input-bank 4
 
 # UL/DL 可调整无线参数；trials不含预热
 python3 bench.py run UL --threads 8 --rb 50 --carrier-rb 106 --mcs 14 --symbols 13 --snr 20 --warmup 10 --trials 100
+# 编码默认MCS9；默认DMRS开销12 RE/RB，对齐本次RFsim的编码工作量
+python3 bench.py run DL --threads 1 --rb 50 --carrier-rb 106 --mcs 9 --symbols 13 --trials 200
+# 复现旧MCS14 / 单CDM组 / Zc384编码配置，需要显式恢复旧参数
+python3 bench.py run DL --threads 1 --mcs 14 --symbols 13 --dl-dmrs-count 1 --dl-dmrs-groups 1 --dl-tbslbrm 950984
 python3 bench.py sweep examples/sweep.json
 ```
 
@@ -40,6 +44,9 @@ python3 bench.py sweep examples/sweep.json
 - RB/MCS/符号数/SNR/trials 仅用于 UL/DL；层数固定1，其余PUSCH规模仍固定。不能对不支持的模块静默应用选项。
 - `--seconds` 仅用于PUSCH/LLR/neural。UL/DL用 `--trials`；DFT用 `--iterations` 和 `--batches`。
 - DL 保留原程序3次外层链路循环，内部编码次数由 trials+warmup 控制。以实际日志和正式记录数为准。
+- DL默认50 RB、106 RB载波、MCS9、13符号、1个type-1 DMRS符号、2个无数据CDM组、tbslbrm=184424；默认编码工作量为9480 bit信息、14400 bit输出、BG1/Zc224、两个码块。这是已核对RFsim的编码参数配置，不声称所有RFsim或所有资源规模都采用这些值。UL默认仍是MCS14，没有改变译码输入。
+- `--dl-dmrs-count`（1–4且不超过符号数）、`--dl-dmrs-groups`（1或2）和`--dl-tbslbrm`仅用于DL。运行日志打印实际配置。改变MCS、资源或DMRS会改变TBS和LDPC形状，不能把不同条件的耗时作为优化前后对照。
+- `metadata.json` 的 `encoding_profile` 保存本次DL的RB、MCS、符号数、DMRS和tbslbrm参数；实际TBS与可用比特数另见 `run.log`。
 
 配置列表是 JSON 数组，每项填写 metric、threads 及 run 参数，键名可用下划线或连字符。各配置顺序运行、分别出结果。
 

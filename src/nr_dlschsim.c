@@ -1,5 +1,7 @@
 
 #include <time.h>
+#include <stdlib.h>
+#include <errno.h>
 static double coding_clock(clockid_t c){struct timespec t;clock_gettime(c,&t);return t.tv_sec+t.tv_nsec*1e-9;}
 static unsigned long long coding_hash(const void*ptr,size_t n){const unsigned char*p=ptr;unsigned long long h=1469598103934665603ull;for(size_t i=0;i<n;i++){h^=p[i];h*=1099511628211ull;}return h;}
 /*
@@ -138,7 +140,7 @@ int main(int argc, char **argv)
   double DS_TDL = .03;
   cpuf = get_cpu_freq_GHz();
   char gNBthreads[128]="n";
-  int Tbslbrm = 950984;
+  int Tbslbrm = 950984; /* Legacy direct-binary default; the launcher supplies the RFsim profile. */
 
   if ((uniqCfg = load_configmodule(argc, argv, CONFIG_ENABLECMDLINEONLY)) == 0) {
     exit_fun("[NR_DLSCHSIM] Error, configuration module init failed\n");
@@ -451,8 +453,28 @@ int main(int argc, char **argv)
   nfapi_nr_dl_tti_pdsch_pdu_rel15_t *rel15 = &dlsch->harq_process.pdsch_pdu.pdsch_pdu_rel15;
 	//time_stats_t *rm_stats, *te_stats, *i_stats;
 	unsigned int TBS = 8424;
-	uint8_t nb_re_dmrs = 6;  // No data in dmrs symbol
+	uint8_t dmrs_groups = 1;
 	uint16_t length_dmrs = 1;
+  const char *dl_env_names[] = {"CODING_DL_DMRS_COUNT", "CODING_DL_DMRS_GROUPS", "CODING_DL_TBSLBRM"};
+  long dl_values[] = {1, 1, Tbslbrm};
+  for (int i=0;i<3;i++) {
+    const char *s=getenv(dl_env_names[i]);
+    if(s) {
+      char *end; errno=0; long v=strtol(s,&end,10);
+      AssertFatal(!errno && *s && !*end && v>=1 && v<=2147483647L,"Invalid %s\n",dl_env_names[i]);
+      dl_values[i]=v;
+    }
+  }
+  AssertFatal(dl_values[0]<=4 && dl_values[0]<=nb_symb_sch,"Invalid DMRS count\n");
+  AssertFatal(dl_values[1]<=2,"Invalid DMRS groups for type 1\n");
+  length_dmrs=dl_values[0]; dmrs_groups=dl_values[1]; Tbslbrm=dl_values[2];
+  uint8_t nb_re_dmrs=6*dmrs_groups;
+  uint16_t dmrs_mask=0;
+  for(unsigned i=0;i<length_dmrs;i++) {
+    unsigned pos=length_dmrs==1 ? (nb_symb_sch>2?2:0) : i*(nb_symb_sch-1)/(length_dmrs-1);
+    dmrs_mask|=1u<<pos;
+  }
+  printf("[ENCODING_PROFILE] rb=%u carrier_rb=%u mcs=%u symbols=%u dmrs_count=%u dmrs_groups=%u dmrs_re_per_rb=%u tbslbrm=%d\n",nb_rb,N_RB_DL,Imcs,nb_symb_sch,length_dmrs,dmrs_groups,nb_re_dmrs*length_dmrs,Tbslbrm);
 	uint8_t Nl = 1;
 	uint8_t rvidx = 0;
 	/*dlsch->harq_processes[0]->mcs = Imcs;
@@ -473,9 +495,9 @@ int main(int argc, char **argv)
   rel15->targetCodeRate[0] = rate;
   rel15->NrOfCodewords = 1;
   rel15->dmrsConfigType = NFAPI_NR_DMRS_TYPE1;
-	rel15->dlDmrsSymbPos = 4;
+	rel15->dlDmrsSymbPos = dmrs_mask;
 	rel15->mcsIndex[0] = Imcs;
-  rel15->numDmrsCdmGrpsNoData = 1;
+  rel15->numDmrsCdmGrpsNoData = dmrs_groups;
   rel15->maintenance_parms_v3.tbSizeLbrmBytes = Tbslbrm;
   rel15->maintenance_parms_v3.ldpcBaseGraph = get_BG(TBS, rate);
 	double modulated_input[16 * 68 * 384]; // [hna] 16 segments, 68*Zc
@@ -498,8 +520,8 @@ int main(int argc, char **argv)
   dlsch0_ue->dlsch_config.TBS = TBS;
   dlsch0_ue->dlsch_config.ldpcBaseGraph = get_BG(TBS, rate);
 	dlsch0_ue->dlsch_config.dmrsConfigType = NFAPI_NR_DMRS_TYPE1;
-	dlsch0_ue->dlsch_config.dlDmrsSymbPos = 4;
-	dlsch0_ue->dlsch_config.n_dmrs_cdm_groups = 1;
+	dlsch0_ue->dlsch_config.dlDmrsSymbPos = dmrs_mask;
+	dlsch0_ue->dlsch_config.n_dmrs_cdm_groups = dmrs_groups;
   dlsch0_ue->dlsch_config.tbslbrm = Tbslbrm;
 	printf("harq process ue mcs = %d Qm = %d, symb %d\n", dlsch0_ue->dlsch_config.mcs, dlsch0_ue->dlsch_config.qamModOrder, nb_symb_sch);
 

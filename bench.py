@@ -2,7 +2,7 @@
 """Independent, relocatable XSAI module benchmark launcher (64-bit Linux: RISC-V, x86-64, ARM64)."""
 import argparse,csv,datetime,math,hashlib,json,os,pathlib,re,shlex,shutil,subprocess,sys,uuid,statistics
 from platform_build import source_root, compiler, host_arch, check_library_arch, build_official, cache_value
-from bench_support import BenchError, select_cpus, benchmark_lock, fixed_frequency, frequency_snapshot, check_frequency, records, write_csv, summary, decoder_quality
+from bench_support import BenchError, select_cpus, benchmark_lock, fixed_frequency, frequency_snapshot, check_frequency, records, write_csv, summary, decoder_quality, coding_parameters
 from cycle_support import cycle_result
 P=pathlib.Path;ROOT=P(__file__).resolve().parent
 NAMES={'estimation':'test_pusch_estimation','measurement':'test_pusch_measurement','symbol':'test_pusch_symbol','llr':'test_llr_region','UL':'nr_ulschsim','DL':'nr_dlschsim','neural':'test_neural','demapper':'test_demapper','dft':'bench-coop','idft':'bench-coop'}
@@ -193,6 +193,7 @@ def run(a):
  if a.input_bank<1 or a.input_bank>16:raise BenchError('--input-bank must be 1..16')
  if a.metric in ('UL','DL') and a.input_bank!=1:raise BenchError('Input banks are not supported for UL/DL')
  if a.metric not in ('UL','DL') and any(v is not None for v in (a.rb,a.carrier_rb,a.mcs,a.symbols,a.snr,a.trials)):raise BenchError('Radio/trial parameters apply only to UL/DL')
+ radio=coding_parameters(a.metric,a.mcs,a.symbols,a.dl_dmrs_count,a.dl_dmrs_groups,a.dl_tbslbrm)
  if a.metric not in ('dft','idft') and (a.verify!='strict' or a.iterations!=10000 or a.batches!=7):raise BenchError('Verification/iteration/batch options apply only to DFT/IDFT')
  for value,name,lo,hi in [(a.rb,'rb',1,106),(a.carrier_rb,'carrier-rb',1,106),(a.mcs,'mcs',0,28),(a.symbols,'symbols',1,13),(a.trials,'trials',1,100000),(a.iterations,'iterations',1,10000000),(a.batches,'batches',1,1000)]:
   if value is not None and not lo<=value<=hi:raise BenchError(f'--{name} must be in [{lo}, {hi}]')
@@ -224,8 +225,10 @@ def run(a):
  elif a.metric in ('UL','DL'):
   total=warmup+(a.trials or 100);snr=20. if a.snr is None else a.snr
   env.update(CODING_WORKERS=str(n),CODING_REPEATS=str(total),CODING_WARMUP=str(warmup))
-  args=['-n',str(total) if a.metric=='UL' else '3','-s',str(snr),'-S',str(snr+0.01),'-r',str(a.rb or 50),'-R',str(a.carrier_rb or 106),'-m',str(a.mcs if a.mcs is not None else 14),'-l',str(a.symbols or 13)]
-  if a.metric=='DL':args+=['-X','n' if n==0 else ','.join(['-1']*8)]
+  args=['-n',str(total) if a.metric=='UL' else '3','-s',str(snr),'-S',str(snr+0.01),'-r',str(a.rb or 50),'-R',str(a.carrier_rb or 106),'-m',str(radio['mcs']),'-l',str(radio['symbols'])]
+  if a.metric=='DL':
+   env.update(CODING_DL_DMRS_COUNT=str(radio['dmrs_count']),CODING_DL_DMRS_GROUPS=str(radio['dmrs_groups']),CODING_DL_TBSLBRM=str(radio['tbslbrm']))
+   args+=['-X','n' if n==0 else ','.join(['-1']*8)]
  elif a.metric in ('neural','demapper'):
   if a.amx_mode and a.neural_backend!='amx':raise BenchError('--amx-mode requires --backend amx')
   if a.ov_topology and a.neural_backend!='ov':raise BenchError('--ov-topology requires --backend ov')
@@ -273,6 +276,7 @@ def run(a):
   out=P(a.out).resolve() if a.out else ROOT/'results'/(datetime.datetime.now().strftime('%Y%m%d-%H%M%S')+'-'+a.metric+'-'+uuid.uuid4().hex[:6]);out.mkdir(parents=True,exist_ok=False)
   meta=dict(status='running',metric=a.metric,threads_requested=a.threads,workers_configured=n,cpus=cpus,seed=a.seed,config=c,argv=cmd,env=changes,notes=notes,frequency_before=before,pmu=c.get('metric_pmu',{}).get(a.metric,False),kernel=subprocess.check_output(['uname','-a'],text=True).strip(),libdfts_sha256=sha(b/'libdfts.so'),warmup_calls=warmup,input_bank=a.input_bank,cache_protocol='fixed-input warm-cache steady state' if a.input_bank==1 else 'cycling pregenerated bank; not guaranteed cold-cache')
   meta.update(cycles_mode=cycle_mode)
+  if a.metric=='DL':meta['encoding_profile']=dict(rb=a.rb or 50,carrier_rb=a.carrier_rb or 106,**radio)
   if os.environ.get('LD_PRELOAD'):
    meta['ld_preload']=os.environ['LD_PRELOAD']
    meta['notes'].append('LD_PRELOAD was set for this run; preloaded objects can instrument or replace the measured code path.')
@@ -375,6 +379,7 @@ def make_parser():
  r.add_argument('--cycles',choices=['auto','off','required'],help='Auto-detect hardware CPU cycles (default); off avoids PMU collection; required fails if unavailable')
  r.add_argument('--re',type=int,help='Demapper input RE count (default 600, 16-QAM only)');r.add_argument('--demapper-input',choices=['independent','phys'],default='independent',help='Demapper input protocol: independent random I/Q and magnitudes (default), or phys for |I/Q| <= 4*magnitude as the AMX adapter requires')
  for opt in ('warmup','rb','carrier-rb','mcs','symbols','trials'):r.add_argument('--'+opt,type=int)
+ for opt in ('dl-dmrs-count','dl-dmrs-groups','dl-tbslbrm'):r.add_argument('--'+opt,type=int)
  r.add_argument('--snr',type=float);r.add_argument('--input-bank',type=int,default=1);r.add_argument('--iterations',type=int,default=10000);r.add_argument('--batches',type=int,default=7)
  r.add_argument('--verify',choices=['strict','report','skip'],default='strict');r.add_argument('--skip-verify',dest='verify',action='store_const',const='skip')
  sw=sp.add_parser('sweep');sw.add_argument('file',help='JSON list of run argument dictionaries')

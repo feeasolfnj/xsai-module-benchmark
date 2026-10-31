@@ -28,6 +28,15 @@ def run_case(args, expected=0):
     if 'UL' in args:
         q = json.loads((result_dir / 'summary.json').read_text())['decoder_quality']
         assert q['measured_trials'] == 2 and q['succeeded'] == 2 and not q['false_positives'], q
+    if 'DL' in args:
+        profile = json.loads((result_dir / 'metadata.json').read_text())['encoding_profile']
+        assert profile == dict(rb=50, carrier_rb=106, mcs=9, symbols=13,
+                               dmrs_count=1, dmrs_groups=2, tbslbrm=184424), profile
+        log = (result_dir / 'run.log').read_text()
+        assert 'available bits 14400 TBS 9480 mod_order 2' in log, log[-4000:]
+        trials = json.loads((result_dir / 'results.json').read_text())
+        coding = [r for r in trials if r['record_type'] == 'CODING_DL']
+        assert len(coding) == 2 and all(int(r['bits']) == 9480 for r in coding), coding
     cycles = json.loads((result_dir / 'cycles.json').read_text())
     assert cycles['status'] in ('available', 'unavailable', 'invalid', 'disabled'), cycles
     if cycles['status'] == 'available':
