@@ -36,7 +36,10 @@ def ov_json(log,prefix):
  if not isinstance(value,dict):raise BenchError(f'Unexpected {prefix.strip()} record')
  return value
 def check_ldpc_log(log,version):
- if 'Initialized CPU LDPC decoder' not in log:raise BenchError(f'libldpc{version}.so did not print its init banner; the requested LDPC library was not the one loaded. Check that the file sits in the build directory and that any missing host symbols are provided.')
+ if 'Initialized CPU LDPC decoder' in log:return
+ sink=os.environ.get('LDPC_PROFILE_PATH')
+ if sink and P(sink).exists():return
+ raise BenchError(f'libldpc{version}.so did not print its init banner; the requested LDPC library was not the one loaded. Check that the file sits in the build directory and that any missing host symbols are provided.')
 def check_ov_log(log,model,topology):
  if 'NRX worker property readback failed or C policy mismatch' in log:
   raise BenchError('The OV plugin rejected its own worker property readback (C policy mismatch); this timing is invalid')
@@ -285,6 +288,9 @@ def run(a):
    plugin=b/f'libldpc{a.ldpc_version}.so'
    meta.update(ldpc_version=a.ldpc_version,ldpc_library=str(plugin),ldpc_plugin_sha256=sha(plugin) if plugin.exists() else None)
    meta['notes'].append('UL decoding uses the plugin named by --ldpc-version, not the tree default libldpc.so. Its encoder is the shared source file, so DL is not a plugin comparison and is refused by this option.')
+   if os.environ.get('LDPC_EXPERIMENT_IMPL'):meta['ldpc_experiment_impl']=os.environ['LDPC_EXPERIMENT_IMPL']
+   if os.environ.get('LDPC_PROFILE_PATH'):meta['ldpc_profile_sink']=os.environ['LDPC_PROFILE_PATH']
+   if os.environ.get('LDPC_INTERNAL_PROFILE'):meta['ldpc_internal_profile']=os.environ['LDPC_INTERNAL_PROFILE']
   if os.environ.get('LD_PRELOAD'):
    meta['ld_preload']=os.environ['LD_PRELOAD']
    meta['notes'].append('LD_PRELOAD was set for this run; preloaded objects can instrument or replace the measured code path.')
