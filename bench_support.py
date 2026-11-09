@@ -11,6 +11,14 @@ class BenchError(Exception):
     pass
 
 
+def coding_allocation(metric, rb=None, carrier_rb=None, ldpc_version=None):
+    """Use 50 RB for CUDA_LDPC plugins, including their CPU ports, and 24 for native UL."""
+    plugin = re.match(r'_(?:cuda|cpu)(?:_|$)', ldpc_version or '')
+    default_rb = 24 if metric == 'UL' and not plugin else 50
+    return (default_rb if rb is None else rb,
+            106 if carrier_rb is None else carrier_rb)
+
+
 def coding_parameters(metric, mcs=None, symbols=None, dmrs_count=None, dmrs_groups=None, tbslbrm=None):
     """DL defaults match the measured 50-RB RFsim encoding workload; UL is unchanged."""
     dl_options = (dmrs_count, dmrs_groups, tbslbrm)

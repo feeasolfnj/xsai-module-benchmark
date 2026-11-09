@@ -2,7 +2,7 @@
 """Independent, relocatable XSAI module benchmark launcher (64-bit Linux: RISC-V, x86-64, ARM64)."""
 import argparse,csv,datetime,math,hashlib,json,os,pathlib,re,shlex,shutil,subprocess,sys,uuid,statistics
 from platform_build import source_root, compiler, host_arch, check_library_arch, build_official, cache_value
-from bench_support import BenchError, select_cpus, benchmark_lock, fixed_frequency, frequency_snapshot, check_frequency, records, write_csv, summary, decoder_quality, coding_parameters
+from bench_support import BenchError, select_cpus, benchmark_lock, fixed_frequency, frequency_snapshot, check_frequency, records, write_csv, summary, decoder_quality, coding_parameters, coding_allocation
 from cycle_support import cycle_result
 P=pathlib.Path;ROOT=P(__file__).resolve().parent
 NAMES={'estimation':'test_pusch_estimation','measurement':'test_pusch_measurement','symbol':'test_pusch_symbol','llr':'test_llr_region','UL':'nr_ulschsim','DL':'nr_dlschsim','neural':'test_neural','demapper':'test_demapper','dft':'bench-coop','idft':'bench-coop'}
@@ -202,7 +202,8 @@ def run(a):
  if a.metric not in ('dft','idft') and (a.verify!='strict' or a.iterations!=10000 or a.batches!=7):raise BenchError('Verification/iteration/batch options apply only to DFT/IDFT')
  for value,name,lo,hi in [(a.rb,'rb',1,106),(a.carrier_rb,'carrier-rb',1,106),(a.mcs,'mcs',0,28),(a.symbols,'symbols',1,13),(a.trials,'trials',1,100000),(a.iterations,'iterations',1,10000000),(a.batches,'batches',1,1000)]:
   if value is not None and not lo<=value<=hi:raise BenchError(f'--{name} must be in [{lo}, {hi}]')
- if (a.rb or 50)>(a.carrier_rb or 106):raise BenchError('--rb cannot exceed --carrier-rb')
+ rb,carrier_rb=coding_allocation(a.metric,a.rb,a.carrier_rb,a.ldpc_version)
+ if rb>carrier_rb:raise BenchError('--rb cannot exceed --carrier-rb')
  if not 0<=a.seed<=4294967295:raise BenchError('--seed must fit uint32')
  if a.ldpc_version and a.metric!='UL':raise BenchError('--ldpc-version applies to the UL decoding path only: this plugin supplies no separate encoder, so DL would just load the same shared encoder under another name')
  if a.snr is not None and not math.isfinite(a.snr):raise BenchError('--snr must be finite')
@@ -231,7 +232,7 @@ def run(a):
  elif a.metric in ('UL','DL'):
   total=warmup+(a.trials or 100);snr=20. if a.snr is None else a.snr
   env.update(CODING_WORKERS=str(n),CODING_REPEATS=str(total),CODING_WARMUP=str(warmup))
-  args=['-n',str(total) if a.metric=='UL' else '3','-s',str(snr),'-S',str(snr+0.01),'-r',str(a.rb or 50),'-R',str(a.carrier_rb or 106),'-m',str(radio['mcs']),'-l',str(radio['symbols'])]
+  args=['-n',str(total) if a.metric=='UL' else '3','-s',str(snr),'-S',str(snr+0.01),'-r',str(rb),'-R',str(carrier_rb),'-m',str(radio['mcs']),'-l',str(radio['symbols'])]
   if a.metric=='DL':
    env.update(CODING_DL_DMRS_COUNT=str(radio['dmrs_count']),CODING_DL_DMRS_GROUPS=str(radio['dmrs_groups']),CODING_DL_TBSLBRM=str(radio['tbslbrm']))
    args+=['-X','n' if n==0 else ','.join(['-1']*8)]
@@ -283,7 +284,7 @@ def run(a):
   out=P(a.out).resolve() if a.out else ROOT/'results'/(datetime.datetime.now().strftime('%Y%m%d-%H%M%S')+'-'+a.metric+'-'+uuid.uuid4().hex[:6]);out.mkdir(parents=True,exist_ok=False)
   meta=dict(status='running',metric=a.metric,threads_requested=a.threads,workers_configured=n,cpus=cpus,seed=a.seed,config=c,argv=cmd,env=changes,notes=notes,frequency_before=before,pmu=c.get('metric_pmu',{}).get(a.metric,False),kernel=subprocess.check_output(['uname','-a'],text=True).strip(),libdfts_sha256=sha(b/'libdfts.so'),warmup_calls=warmup,input_bank=a.input_bank,cache_protocol='fixed-input warm-cache steady state' if a.input_bank==1 else 'cycling pregenerated bank; not guaranteed cold-cache')
   meta.update(cycles_mode=cycle_mode)
-  if a.metric=='DL':meta['encoding_profile']=dict(rb=a.rb or 50,carrier_rb=a.carrier_rb or 106,**radio)
+  if a.metric=='DL':meta['encoding_profile']=dict(rb=rb,carrier_rb=carrier_rb,**radio)
   if a.ldpc_version:
    plugin=b/f'libldpc{a.ldpc_version}.so'
    meta.update(ldpc_version=a.ldpc_version,ldpc_library=str(plugin),ldpc_plugin_sha256=sha(plugin) if plugin.exists() else None)
@@ -295,9 +296,9 @@ def run(a):
    meta['ld_preload']=os.environ['LD_PRELOAD']
    meta['notes'].append('LD_PRELOAD was set for this run; preloaded objects can instrument or replace the measured code path.')
   if a.metric=='UL':
-   meta.update(rb=a.rb or 50,carrier_rb=a.carrier_rb or 106,mcs=radio['mcs'],symbols=radio['symbols'])
-   meta['rfsim_matched']=(a.rb or 50)==50 and (a.carrier_rb or 106)==106
-   if not meta['rfsim_matched']:meta['notes'].append('UL allocation is '+str(a.rb or 50)+' RB instead of the rfsim reference 50 RB; do not compare directly with rfsim runs.')
+   meta.update(rb=rb,carrier_rb=carrier_rb,mcs=radio['mcs'],symbols=radio['symbols'])
+   meta['rfsim_matched']=(rb)==50 and (carrier_rb)==106
+   if not meta['rfsim_matched']:meta['notes'].append('UL allocation is '+str(rb)+' RB instead of the rfsim reference 50 RB; do not compare directly with rfsim runs.')
   if a.metric=='UL':meta.update(decoder_input='encoded_bpsk_awgn',snr_db=snr,quantization_bits=8,
                               payload_protocol='one_seeded_random_payload_encoded_once_fresh_awgn_each_trial',
                               timing_scope='nr_ulsch_decoding_full_tb_excluding_input_generation_and_encoding')
@@ -397,7 +398,9 @@ def make_parser():
  r.add_argument('--amx-mode',choices=['amx','bf16_ref'],help='AMX adapter mode for --backend amx: amx needs amx_tile on this host, bf16_ref is the portable BF16 reference')
  r.add_argument('--cycles',choices=['auto','off','required'],help='Auto-detect hardware CPU cycles (default); off avoids PMU collection; required fails if unavailable')
  r.add_argument('--re',type=int,help='Demapper input RE count (default 600, 16-QAM only)');r.add_argument('--demapper-input',choices=['independent','phys'],default='independent',help='Demapper input protocol: independent random I/Q and magnitudes (default), or phys for |I/Q| <= 4*magnitude as the AMX adapter requires')
- for opt in ('warmup','rb','carrier-rb','mcs','symbols','trials'):r.add_argument('--'+opt,type=int)
+ r.add_argument('--rb',type=int,help='Allocated RBs: native UL defaults to 24, CUDA_LDPC (_cuda/_cpu and underscore variants) to 50, DL to 50; explicit value overrides the default')
+ r.add_argument('--carrier-rb',type=int,help='Carrier RB count (default 106)')
+ for opt in ('warmup','mcs','symbols','trials'):r.add_argument('--'+opt,type=int)
  for opt in ('dl-dmrs-count','dl-dmrs-groups','dl-tbslbrm'):r.add_argument('--'+opt,type=int)
  r.add_argument('--snr',type=float);r.add_argument('--input-bank',type=int,default=1);r.add_argument('--iterations',type=int,default=10000);r.add_argument('--batches',type=int,default=7)
  r.add_argument('--ldpc-version',help='UL only: load libldpc<version>.so through --loader.ldpc.shlibversion (for example _cpu or _cpu_avx2); a plugin must print its own init banner or the run fails')

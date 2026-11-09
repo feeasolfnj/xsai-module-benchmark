@@ -139,6 +139,8 @@ python3 bench.py run neural --threads 1 --cpus 0 --backend ov \
 --ldpc-version applies to the UL decoding path only
 ```
 
+UL省略 `--rb` 时，原生译码默认24 PRB；CUDA_LDPC及其CPU移植版（`_cuda`、`_cpu`及其下划线后缀变体，如`_cpu_avx2`）默认50 PRB。显式 `--rb` 优先，载波默认106 PRB。
+
 译码实现不在 benchmark 里：被测程序通过 `load_nrLDPC_coding_interface()` →
 `dlopen("libldpc<version>.so")` 从源码树动态加载，默认拿 `libldpc.so`（树默认解码器）。
 

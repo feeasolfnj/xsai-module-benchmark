@@ -16,7 +16,7 @@
 | measurement | test_pusch_measurement | 首次DMRS对应测量区域 |
 | symbol | test_pusch_symbol | 一个50 RB PUSCH的符号任务构造、执行、等待与统计合并 |
 | llr | test_llr_region | 16-QAM，600 RE的完整LLR计时区域 |
-| UL | nr_ulschsim | 50 RB、两个码块的整个TB译码 |
+| UL | nr_ulschsim | 原生默认24 RB；CUDA_LDPC及其CPU移植版默认50 RB；整个TB译码 |
 | DL | nr_dlschsim | 默认50 RB、MCS9、13符号、DMRS开销12 RE/RB、9480 bit、BG1/Zc224、两个码块的整个编码调用 |
 | neural | test_neural | 24 RB，完整receiver_compute_llr插件回调；原生CPU、官方 TensorRT 或 OpenVINO/BF16 |
 | demapper | test_demapper | 默认600 RE、16-QAM，完整demapper_compute_llr插件回调；原生CPU、AMX-BF16（x86-64）或TensorRT GPU |

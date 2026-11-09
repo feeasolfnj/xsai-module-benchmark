@@ -26,7 +26,7 @@ python3 bench.py run UL --threads 8 --cpus 0-7 --snr 20
 python3 bench.py run UL --threads 1 --snr 0 --trials 100
 ```
 
-默认 seed=20261022、SNR=20 dB、最大 LDPC 迭代次数沿用程序默认5。信息字节通过 `rand()` 生成，使用该seed；信道通过本地OAI的 `randominit` / `gaussdouble` 生成噪声。相同机器、实现、seed和参数下单/八线程使用相同输入序列；不保证不同C库或OAI RNG版本逐比特一致。
+通过 `bench.py run UL` 省略 `--rb` 时，原生译码默认24 PRB，CUDA_LDPC及其CPU移植版（`--ldpc-version _cuda`、`_cpu`及其下划线后缀变体）默认50 PRB；显式 `--rb` 优先，载波默认106 PRB。默认 seed=20261022、SNR=20 dB、最大 LDPC 迭代次数沿用程序默认5。信息字节通过 `rand()` 生成，使用该seed；信道通过本地OAI的 `randominit` / `gaussdouble` 生成噪声。相同机器、实现、seed和参数下单/八线程使用相同输入序列；不保证不同C库或OAI RNG版本逐比特一致。
 
 与上游编译码测试一致，每进程生成一份随机payload并编码一次，trial之间复用码字、使用新的噪声。不是每trial生成新的payload。默认8 bit软信息，存储类型为int16；上游定标为 `sigma/16`，噪声标准差 `sigma=1/sqrt(2*10^(SNR/10))`。此处SNR属于该编码比特信道定义，不应直接称为任意调制或码率下的 Eb/N0。
 

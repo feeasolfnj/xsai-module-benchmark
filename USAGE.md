@@ -42,6 +42,7 @@ python3 bench.py sweep examples/sweep.json
 - `--input-bank` 支持 PUSCH/LLR/neural/demapper/DFT，1–16组。UL将一份随机payload编码后，每trial加入新AWGN；DL仍复用随机payload，不支持输入库。
 - 输入生成在计时外；PUSCH恢复也在模块计时外。LLR批内切换指针、DFT选择索引的开销计入批次时间。输入库不保证冷缓存。
 - RB/MCS/符号数/SNR/trials 仅用于 UL/DL；层数固定1，其余PUSCH规模仍固定。不能对不支持的模块静默应用选项。
+- UL省略 `--rb` 时，原生译码默认24 PRB；选择CUDA_LDPC系列（`--ldpc-version _cuda`、`_cpu`及其下划线后缀变体，如`_cpu_avx2`）默认50 PRB。显式 `--rb` 优先，载波默认106 PRB。`metadata.json`记录实际分配。
 - `--seconds` 仅用于PUSCH/LLR/neural。UL/DL用 `--trials`；DFT用 `--iterations` 和 `--batches`。
 - DL 保留原程序3次外层链路循环，内部编码次数由 trials+warmup 控制。以实际日志和正式记录数为准。
 - DL默认50 RB、106 RB载波、MCS9、13符号、1个type-1 DMRS符号、2个无数据CDM组、tbslbrm=184424；默认编码工作量为9480 bit信息、14400 bit输出、BG1/Zc224、两个码块。这是已核对RFsim的编码参数配置，不声称所有RFsim或所有资源规模都采用这些值。UL默认仍是MCS14，没有改变译码输入。
