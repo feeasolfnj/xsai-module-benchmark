@@ -192,6 +192,19 @@ def source_signature(key):
  return {p.name:sha(p) for p in files}
 
 def run(a):
+ slot_symbols=a.slot_symbols
+ slot_workers=a.slot_workers or 1
+ if slot_symbols is None and (a.slot_workers is not None or a.export_slot_iq):
+  raise BenchError('--slot-workers and --export-slot-iq require --slot-symbols')
+ if slot_symbols is not None:
+  if a.metric not in ('dft','idft') or a.threads!=1 or a.verify!='strict' or a.input_bank!=1 or a.iterations!=10000:
+   raise BenchError('--slot-symbols requires DFT/IDFT, --threads 1, strict verification and default input-bank/iterations')
+  if a.cycles not in (None,'off'):
+   raise BenchError('Slot timing does not collect hardware cycles')
+  if slot_workers==2 and slot_symbols==1:
+   raise BenchError('Two slot workers need at least two symbols')
+  if a.export_slot_iq and sys.byteorder!='little':
+   raise BenchError('Slot IQ export requires a little-endian host')
  if not hasattr(os,'sched_getaffinity'):raise BenchError('Running requires 64-bit Linux')
  if a.seconds is not None and (not math.isfinite(a.seconds) or a.seconds<=0 or a.metric in ('UL','DL','dft','idft')):raise BenchError('--seconds is only for PUSCH/LLR/neural/demapper; use --trials for UL/DL, --iterations for DFT')
  if a.re is not None and (a.metric!='demapper' or not 1<=a.re<=32768):raise BenchError('--re is only for demapper and must be 1..32768')
@@ -209,12 +222,16 @@ def run(a):
  if a.snr is not None and not math.isfinite(a.snr):raise BenchError('--snr must be finite')
  c=config();b=P(c['build'])
  if c.get('architecture',host_arch())!=host_arch():raise BenchError('Build architecture differs from this host; rebuild locally')
- allowed=select_cpus(a.cpus,a.threads);cpus=','.join(map(str,allowed))
+ slot_cpu_count=3 if slot_workers==2 else 1
+ allowed=select_cpus(a.cpus,slot_cpu_count if slot_symbols else a.threads)
+ if slot_symbols and len(allowed)!=slot_cpu_count:
+  raise BenchError(f'This slot mode requires {slot_cpu_count} distinct CPUs (including the coordinator for two workers)')
+ cpus=','.join(map(str,allowed))
  binary=ROOT/'build'/NAMES[a.metric];key='dft' if a.metric=='idft' else a.metric
  ready_file=ROOT/'build/ready.json';ready=json.loads(ready_file.read_text()) if ready_file.exists() else {}
  if ready.get('_profile')!=c.get('profile') or not binary.exists() or any(ready.get(key,{}).get(name)!=digest for name,digest in source_signature(key).items()):raise BenchError('Missing/stale/failed binary; rebuild --only '+key)
  notes=[]
- cycle_mode=a.cycles or c.get('cycles_default','auto')
+ cycle_mode='off' if slot_symbols else a.cycles or c.get('cycles_default','auto')
  cycle_capable=c.get('metric_pmu',{}).get(a.metric,False)
  if cycle_mode=='required' and not cycle_capable:raise BenchError('Hardware cycle instrumentation is missing; rebuild this metric')
  serial=a.metric in ('estimation','measurement','llr') or (a.metric in ('dft','idft') and c.get('dft_backend')=='local-native-serial')
@@ -224,9 +241,20 @@ def run(a):
  for note in notes:print('NOTE:',note)
  n=0 if a.threads==1 or serial or a.metric=='demapper' else 8
  warmup=a.warmup if a.warmup is not None else (10 if a.metric in ('UL','DL') else (10000 if a.metric in ('dft','idft') else (1000 if a.metric=='llr' else (100 if a.metric=='demapper' else 20))))
+ if slot_symbols and a.warmup is None:warmup=20
  if warmup<0:raise BenchError('--warmup must be >= 0')
+ if slot_symbols and warmup>10000:raise BenchError('Slot warmup must be <= 10000')
+ slot_iq=f'iq{slot_symbols}_le_i16.bin' if a.export_slot_iq else None
  env=os.environ.copy();env.update(LD_LIBRARY_PATH=str(b)+(':'+env['LD_LIBRARY_PATH'] if env.get('LD_LIBRARY_PATH') else ''),RANDOM_SEED=str(a.seed),OAI_RNGSEED=str(a.seed),BENCH_CPU_LIST=cpus,RANDOM_CPU_START=str(min(allowed)),RANDOM_CPU_COUNT=str(len(allowed)),BENCH_INPUT_BANK=str(a.input_bank),BENCH_WARMUP=str(warmup))
+ env.pop('BENCH_SLOT_WORKERS',None)
+ env.pop('BENCH_SLOT_IQ',None)
  env['BENCH_CYCLES']=cycle_mode
+ if slot_symbols:
+  env.update(BENCH_INPUT_BANK=str(slot_symbols),BENCH_SLOT_WORKERS=str(slot_workers),
+             BENCH_SLOT_CPU0=str(allowed[0]),BENCH_SLOT_LIBRARY=str((b/'libdfts.so').resolve()))
+  if slot_workers==2:
+   env.update(BENCH_SLOT_CPU1=str(allowed[1]),BENCH_SLOT_COORD_CPU=str(allowed[2]))
+  if slot_iq:env['BENCH_SLOT_IQ']=slot_iq
  if a.metric in ('estimation','measurement','symbol'):args=[str(a.seed),str(n),str(a.seconds or 1.5)]
  elif a.metric=='llr':args=[str(a.seed),str(a.seconds or 1.5)]
  elif a.metric in ('UL','DL'):
@@ -284,6 +312,12 @@ def run(a):
   out=P(a.out).resolve() if a.out else ROOT/'results'/(datetime.datetime.now().strftime('%Y%m%d-%H%M%S')+'-'+a.metric+'-'+uuid.uuid4().hex[:6]);out.mkdir(parents=True,exist_ok=False)
   meta=dict(status='running',metric=a.metric,threads_requested=a.threads,workers_configured=n,cpus=cpus,seed=a.seed,config=c,argv=cmd,env=changes,notes=notes,frequency_before=before,pmu=c.get('metric_pmu',{}).get(a.metric,False),kernel=subprocess.check_output(['uname','-a'],text=True).strip(),libdfts_sha256=sha(b/'libdfts.so'),warmup_calls=warmup,input_bank=a.input_bank,cache_protocol='fixed-input warm-cache steady state' if a.input_bank==1 else 'cycling pregenerated bank; not guaranteed cold-cache')
   meta.update(cycles_mode=cycle_mode)
+  if slot_symbols:
+   meta.update(timing_scope='slot_wall_clock_including_dispatch_and_join',slot_workers=slot_workers,
+               worker_cpus=allowed[:slot_workers],coordinator_cpu=allowed[2] if slot_workers==2 else None,
+               input_bank=slot_symbols,cache_protocol='reused fixed symbol bank',verification_scope='serial_same_implementation')
+   meta['input']=dict(points=2048,symbols=slot_symbols,seed=a.seed,scale=1,
+                      format='little-endian interleaved int16 IQ',component_min=-364,component_max=364)
   if a.metric=='DL':meta['encoding_profile']=dict(rb=rb,carrier_rb=carrier_rb,**radio)
   if a.ldpc_version:
    plugin=b/f'libldpc{a.ldpc_version}.so'
@@ -343,8 +377,28 @@ def run(a):
    if a.neural_backend=='ov':meta['ov_props']=check_ov_log((out/'run.log').read_text(),ov_model,a.ov_topology or 'L')
    if a.ldpc_version:check_ldpc_log((out/'run.log').read_text(),a.ldpc_version)
    if a.freq:check_frequency(allowed,a.freq)
-   raw,parsed=records((out/'run.log').read_text(),warmup)
-   if not any(row['record_type'] in ('RESULT','CODING_UL','CODING_DL') for row in parsed):raise BenchError('Missing result records')
+   log=(out/'run.log').read_text()
+   raw,parsed=records(log,warmup)
+   if slot_symbols:
+    loaded={line.removeprefix('[DFT_SLOT_LIBRARY] ').strip() for line in log.splitlines()
+            if line.startswith('[DFT_SLOT_LIBRARY] ')}
+    if loaded!={env['BENCH_SLOT_LIBRARY']}:raise BenchError('Slot driver did not load the configured libdfts.so')
+    meta['loaded_library']=next(iter(loaded))
+    slots=[row for row in raw if row['record_type']=='DFT_SLOT']
+    if [int(row['trial']) for row in slots]!=list(range(warmup+a.batches)) or any(
+        row.get('verification')!='passed' or row.get('transform')!=a.metric
+        or int(row['points'])!=2048 or int(row['symbols'])!=slot_symbols
+        or int(row['workers'])!=slot_workers or not math.isfinite(float(row['wall_us']))
+        or float(row['wall_us'])<=0 for row in slots):
+     raise BenchError('Invalid or missing verified DFT slot records')
+    if slot_iq:
+     data=out/slot_iq
+     if data.stat().st_size!=8192*slot_symbols:raise BenchError('Invalid size of the exported slot IQ')
+     digest=sha(data)
+     meta['input'].update(file=slot_iq,iq_sha256=digest)
+     if slot_symbols==14:meta['input']['batch14_sha256']=digest
+   elif not any(row['record_type'] in ('RESULT','CODING_UL','CODING_DL') for row in parsed):
+    raise BenchError('Missing result records')
    for row in raw:
     if row['record_type']=='RESULT' and 'verification_scope' not in row:row['verification_scope']='serial_same_implementation' if a.metric in ('estimation','measurement','symbol') else 'repeatability_same_implementation'
     elif row['record_type']=='CODING_UL':row['verification_scope']='crc_and_original_payload'
@@ -404,10 +458,15 @@ def make_parser():
  for opt in ('dl-dmrs-count','dl-dmrs-groups','dl-tbslbrm'):r.add_argument('--'+opt,type=int)
  r.add_argument('--snr',type=float);r.add_argument('--input-bank',type=int,default=1);r.add_argument('--iterations',type=int,default=10000);r.add_argument('--batches',type=int,default=7)
  r.add_argument('--ldpc-version',help='UL only: load libldpc<version>.so through --loader.ldpc.shlibversion (for example _cpu or _cpu_avx2); a plugin must print its own init banner or the run fails')
+ r.add_argument('--slot-symbols',type=int,choices=(1,7,14),help='Measure independent 2048-point symbols as one batch; --batches counts slots')
+ r.add_argument('--slot-workers',type=int,choices=(1,2),help='Independent-symbol workers in slot mode (default 1)')
+ r.add_argument('--export-slot-iq',action='store_true',help='Export the fixed slot input as little-endian interleaved int16 IQ')
  r.add_argument('--verify',choices=['strict','report','skip'],default='strict');r.add_argument('--skip-verify',dest='verify',action='store_const',const='skip')
  sw=sp.add_parser('sweep');sw.add_argument('file',help='JSON list of run argument dictionaries')
  official=sp.add_parser('official-demapper-test',help='Run upstream CUDA/TensorRT pytest accuracy tests (requires Sionna environment)')
  official.add_argument('--srk',required=True);official.add_argument('--python',default=sys.executable);official.add_argument('--out')
+ from aerial_ofdm import add_parser as add_aerial_parser
+ add_aerial_parser(sp)
  return ap
 
 def main():
@@ -416,6 +475,9 @@ def main():
   if a.command=='official-demapper-test':
    from official_demapper import run_official
    run_official(a,ROOT)
+  elif a.command=='aerial-ofdm':
+   from aerial_ofdm import dispatch
+   dispatch(a,ROOT)
   else:{'doctor':doctor,'build':locked_build,'run':run,'sweep':sweep}[a.command](a)
  except (BenchError,AssertionError,OSError,ValueError,KeyError) as exc:print('ERROR:',exc,file=sys.stderr);return 2
  return 0

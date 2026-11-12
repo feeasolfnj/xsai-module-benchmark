@@ -21,6 +21,8 @@
 | neural | test_neural | 24 RB，完整receiver_compute_llr插件回调；原生CPU、官方 TensorRT 或 OpenVINO/BF16 |
 | demapper | test_demapper | 默认600 RE、16-QAM，完整demapper_compute_llr插件回调；原生CPU、AMX-BF16（x86-64）或TensorRT GPU |
 | dft / idft | bench-coop | 单份2048点变换；K3 RVV 可八线程协同，官方配置使用本地串行原实现 |
+| dft / idft 整槽 | bench-coop | 用本地库测一组独立的2048点符号，支持1/2计算线程和IQ导出 |
+| aerial-ofdm | aerial-ofdm-rx | 用相同有效IQ测Aerial原生OFDM接收、GPU多槽容量及SM分配，见 [AERIAL_OFDM.md](AERIAL_OFDM.md) |
 
 PUSCH估计、测量、符号处理是提取的原处理区域；不是上游正式发布的独立模块API。构建时链接本地XSAI库。源码/结构体不兼容时必须修改适配，不保证任意XSAI版本都能编译。
 

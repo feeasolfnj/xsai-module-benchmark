@@ -69,6 +69,22 @@ python3 bench.py run dft --threads 8 --iterations 1000 --batches 7 --warmup 100
 
 这里计时一次2048点变换，**不含CP添加、资源提取或完整symbol_dft/symbol_idft外层**。八线程协同处理同一变换，共享工作区，不支持多调用者重入。
 
+### 独立符号的整槽计时
+
+```bash
+python3 bench.py build --xsai /your/path/to/XSAI --only dft
+python3 bench.py run dft --threads 1 --slot-symbols 14 --slot-workers 1 --cpus 0 \
+  --seed 20261111 --batches 200 --warmup 20 --export-slot-iq --out results/ofdm-cpu1
+python3 bench.py run dft --threads 1 --slot-symbols 14 --slot-workers 2 --cpus 0,1,2 \
+  --seed 20261111 --batches 200 --warmup 20 --export-slot-iq --out results/ofdm-cpu2
+```
+
+- `--slot-symbols` 可选 1、7、14，`--batches` 是实测槽数，`--warmup` 是预热槽数。
+- 每次本地库调用处理一份 2048 点变换，所以使用 `--threads 1`。`--slot-workers` 控制外层对独立符号的分工。双 worker 时必须给三个不同的 CPU，排序后的前两个用于计算，最后一个用于协调。给 14 符号时各做 7 份，给 7 符号时做 4+3 份。
+- 墙钟时间从发布任务前到全部输出完成，包含协调开销。IQ 已准备好。每槽与同库串行参考逐位比较，校验和导出在计时之外。此模式不采 PMU 周期。
+- `results.raw.csv` 保留预热与正式样本，`results.csv` 只有正式样本。`summary.json` 的 `DFT_SLOT` 记录逐槽 p50/p95/p99 和按符号摊销时间。摊销值等于整槽均值除以符号数。
+- `--export-slot-iq` 导出 `iq14_le_i16.bin` 等固定输入，`metadata.json` 记录输入哈希和实际加载库。将两文件交给 [Aerial 对照](AERIAL_OFDM.md)，可复用同一批有效 IQ。
+
 ## 神经插件
 
 ```bash

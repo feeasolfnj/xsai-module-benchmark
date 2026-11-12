@@ -92,14 +92,14 @@ def benchmark_lock(path='/tmp/k3-module-benchmark.lock', wait=False):
 
 def records(log, warmup=0):
     raw, measured = [], []
-    tags = ('RESULT', 'CODING_UL', 'CODING_DL', 'PMU_CYCLES')
+    tags = ('RESULT', 'CODING_UL', 'CODING_DL', 'PMU_CYCLES', 'DFT_SLOT')
     for line in log.splitlines():
         tag = next((t for t in tags if line.startswith('[' + t + ']')), None)
         if tag is None:
             continue
         row = dict(re.findall(r'(\w+)=([^\s]+)', line))
         row['record_type'] = tag
-        row['phase'] = 'warmup' if tag.startswith('CODING_') and int(row['trial']) < warmup else 'measurement'
+        row['phase'] = 'warmup' if (tag.startswith('CODING_') or tag == 'DFT_SLOT') and int(row['trial']) < warmup else 'measurement'
         raw.append(row)
         if row['phase'] == 'measurement':
             measured.append(row)
@@ -124,6 +124,14 @@ def summary(rows):
             values = [float(r[key]) for r in group if key in r]
             if values:
                 item[key] = statistics.mean(values)
+        if tag == 'DFT_SLOT':
+            values = sorted(float(r['wall_us']) for r in group)
+            symbols = int(group[0]['symbols'])
+            mean = statistics.mean(values)
+            item.update(slot_mean_us=mean, slot_p50_us=statistics.median(values),
+                        slot_p95_us=values[(95 * len(values) + 99) // 100 - 1],
+                        slot_p99_us=values[(99 * len(values) + 99) // 100 - 1],
+                        amortized_symbol_us=mean/symbols, transforms_per_second=symbols*1e6/mean)
         if tag.startswith('CODING_'):
             pairs = [(float(r['cpu_us']), float(r['wall_us'])) for r in group if 'cpu_us' in r]
             if pairs and sum(w for _, w in pairs):

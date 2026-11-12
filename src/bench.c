@@ -16,16 +16,23 @@ extern int latency_verification_status(void);
 static double tm(clockid_t id){struct timespec t;clock_gettime(id,&t);return t.tv_sec+t.tv_nsec*1e-9;}
 static int cmp(const void*a,const void*b){double x=*(double*)a,y=*(double*)b;return (x>y)-(x<y);}
 static int option(const char*k,int d){return getenv(k)?atoi(getenv(k)):d;}
+#include "dft_slot.h"
 int main(int argc,char**argv){
  int inverse=argc>1&&!strcmp(argv[1],"idft");
  unsigned seed=argc>2?strtoul(argv[2],0,0):1,rng=seed?seed:1;
  int bank=option("BENCH_INPUT_BANK",1),iterations=option("BENCH_ITERATIONS",10000),batches=option("BENCH_BATCHES",7),warmup=option("BENCH_WARMUP",10000);
+ if(warmup>10000&&getenv("BENCH_SLOT_WORKERS"))return 2;
  if(bank<1||bank>16||iterations<1||batches<1||batches>1000||warmup<0)return 2;
  int16_t *x,*y,*ref;assert(!posix_memalign((void**)&x,64,8192*bank));assert(!posix_memalign((void**)&y,64,8192));assert(!posix_memalign((void**)&ref,64,8192));
  const char*mode=getenv("BENCH_VERIFY");if(!mode)mode="strict";
  assert(!selected_module.setup(2048,inverse));
  int status=latency_verification_status(),skip=!strcmp(mode,"skip");
  for(int i=0;i<4096*bank;i++){rng^=rng<<13;rng^=rng>>17;rng^=rng<<5;x[i]=(rng%729)-364;}
+ int slot_workers=option("BENCH_SLOT_WORKERS",0);
+ if(slot_workers){
+  int result=run_dft_slot(x,bank,slot_workers,warmup,batches,inverse);
+  free(x);free(y);free(ref);return result;
+ }
  if(!skip){
   int matched=status!=0;
   for(int b=0;b<bank;b++){reference_module.run(x+4096*b,ref,1);selected_module.run(x+4096*b,y,1);if(memcmp(ref,y,8192))matched=0;}
